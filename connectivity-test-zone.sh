@@ -2,11 +2,13 @@
 set -euo pipefail
 
 DOMAIN=""
+DOMAINS_FILE=""
 PORTS="20,21,22,23,25,53,80,88,135,389,443,445,3389,5985,5986,8080,8081,8433"
 OUTJSON=false
 OUTDIR=""
 JSON_FILENAME="connectivity-results.json"
 NMAP_TIMEOUT_SECONDS=60
+SCRIPT_NAME="./connectivity-test-zone.sh"
 
 GREEN=$'\033[32m'
 RESET=$'\033[0m'
@@ -33,11 +35,14 @@ REQUIRED_COMMANDS=(
 usage() {
 	cat <<EOF
 Usage:
-  $0 --domain example.com [options]
-  $0 -d example.com [options]
+  ${SCRIPT_NAME} --domain example.com [options]
+  ${SCRIPT_NAME} -d example.com [options]
+  ${SCRIPT_NAME} --domains-file domains.txt [options]
+  ${SCRIPT_NAME} -df domains.txt [options]
 
 Options:
   -d,  --domain           DNS zone / root domain to enumerate
+  -df, --domains-file     Text file containing DNS zones / root domains to enumerate
   -p,  --ports            Comma-separated ports to test
                           Default: ${PORTS}
   -oj, --outjson          Save JSON output to a file
@@ -47,14 +52,16 @@ Options:
   -h,  --help             Help
 
 Examples:
-  $0 --domain example.com
-  $0 -d example.com
-  $0 --domain example.com --ports 22,80,443
-  $0 -d example.com -p 22,80,443
-  $0 --domain example.com --outjson
-  $0 -d example.com -oj
-  $0 --domain example.com --outjson --outdir ./results
-  $0 -d example.com -oj -od ./results
+  ${SCRIPT_NAME} --domain example.com
+  ${SCRIPT_NAME} -d example.com
+  ${SCRIPT_NAME} --domains-file domains.txt
+  ${SCRIPT_NAME} -df domains.txt
+  ${SCRIPT_NAME} --domain example.com --ports 22,80,443
+  ${SCRIPT_NAME} -d example.com -p 22,80,443
+  ${SCRIPT_NAME} --domain example.com --outjson
+  ${SCRIPT_NAME} -d example.com -oj
+  ${SCRIPT_NAME} --domain example.com --outjson --outdir ./results
+  ${SCRIPT_NAME} -d example.com -oj -od ./results
 EOF
 }
 
@@ -80,10 +87,26 @@ check_dependencies() {
 	fi
 }
 
-validate_domain() {
-	if [[ -z "$DOMAIN" ]]; then
-		echo "[-] Missing required domain." >&2
+validate_input() {
+	if [[ -n "$DOMAIN" && -n "$DOMAINS_FILE" ]]; then
+		echo "[-] Use either --domain or --domains-file, not both." >&2
 		usage
+		exit 1
+	fi
+
+	if [[ -z "$DOMAIN" && -z "$DOMAINS_FILE" ]]; then
+		echo "[-] Missing required domain or domains file." >&2
+		usage
+		exit 1
+	fi
+
+	if [[ -n "$DOMAINS_FILE" && ! -f "$DOMAINS_FILE" ]]; then
+		echo "[-] Domains file does not exist: $DOMAINS_FILE" >&2
+		exit 1
+	fi
+
+	if [[ -n "$DOMAINS_FILE" && ! -r "$DOMAINS_FILE" ]]; then
+		echo "[-] Domains file is not readable: $DOMAINS_FILE" >&2
 		exit 1
 	fi
 }
@@ -105,6 +128,11 @@ parse_args() {
 		-d | --domain)
 			require_option_value "$1" "${2:-}"
 			DOMAIN="${2:-}"
+			shift 2
+			;;
+		-df | --domains-file)
+			require_option_value "$1" "${2:-}"
+			DOMAINS_FILE="${2:-}"
 			shift 2
 			;;
 		-p | --ports)
@@ -135,8 +163,8 @@ parse_args() {
 }
 
 parse_args "$@"
+validate_input
 check_dependencies
-validate_domain
 
 WORKDIR="$(mktemp -d)"
 cleanup() {
@@ -144,26 +172,53 @@ cleanup() {
 }
 trap cleanup EXIT
 
+DOMAINS="${WORKDIR}/domains.txt"
 SUBFINDER_RAW_SUBS="${WORKDIR}/subfinder-subdomains.raw.txt"
 SUBS="${WORKDIR}/subdomains.txt"
 JSON_TEMP="${WORKDIR}/${JSON_FILENAME}"
 NMAP_TMPDIR="${WORKDIR}/nmap"
 
 mkdir -p "$NMAP_TMPDIR"
+: >"$SUBFINDER_RAW_SUBS"
+: >"$SUBS"
 
-printf '%s Enumerating subdomains for %s...\n' "$INFO_PREFIX" "$DOMAIN" >&2
+if [[ -n "$DOMAINS_FILE" ]]; then
+	sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//; s/\.$//' "$DOMAINS_FILE" |
+		tr '[:upper:]' '[:lower:]' |
+		grep -E '[^[:space:]]' |
+		sort -u >"$DOMAINS" || true
+else
+	printf '%s\n' "${DOMAIN%.}" |
+		tr '[:upper:]' '[:lower:]' >"$DOMAINS"
+fi
 
-subfinder -d "$DOMAIN" -silent -o "$SUBFINDER_RAW_SUBS" >/dev/null 2>&1 || {
-	echo "[-] subfinder failed." >&2
+DOMAIN_COUNT="$(wc -l <"$DOMAINS" | tr -d ' ')"
+
+if [[ "$DOMAIN_COUNT" -eq 0 ]]; then
+	echo "[-] No domains found in domains file: $DOMAINS_FILE" >&2
 	exit 1
-}
+fi
 
-DOMAIN_REGEX="${DOMAIN//./\\.}"
+while IFS= read -r ROOT_DOMAIN; do
+	printf '%s Enumerating subdomains for %s...\n' "$INFO_PREFIX" "$ROOT_DOMAIN" >&2
 
-sed 's/\.$//' "$SUBFINDER_RAW_SUBS" |
-	tr '[:upper:]' '[:lower:]' |
-	grep -E "(^|\.)${DOMAIN_REGEX}$" |
-	sort -u >"$SUBS" || true
+	SUBFINDER_DOMAIN_RAW_SUBS="${WORKDIR}/subfinder-${ROOT_DOMAIN}.raw.txt"
+
+	subfinder -d "$ROOT_DOMAIN" -silent -o "$SUBFINDER_DOMAIN_RAW_SUBS" >/dev/null 2>&1 || {
+		echo "[-] subfinder failed for $ROOT_DOMAIN." >&2
+		exit 1
+	}
+
+	cat "$SUBFINDER_DOMAIN_RAW_SUBS" >>"$SUBFINDER_RAW_SUBS"
+
+	DOMAIN_REGEX="${ROOT_DOMAIN//./\\.}"
+
+	sed 's/\.$//' "$SUBFINDER_DOMAIN_RAW_SUBS" |
+		tr '[:upper:]' '[:lower:]' |
+		grep -E "(^|\.)${DOMAIN_REGEX}$" >>"$SUBS" || true
+done <"$DOMAINS"
+
+sort -u -o "$SUBS" "$SUBS"
 
 COUNT="$(wc -l <"$SUBS" | tr -d ' ')"
 
@@ -183,7 +238,7 @@ fi
 
 RUN_DATETIME="$(date +"%m/%d/%Y %I:%M %p %Z" | sed -E 's#^0##; s#/0#/#; s# 0([0-9]):# \1:#')"
 
-python3 - "$SUBS" "$PORTS" "$NMAP_SCAN_TYPE" "$JSON_TEMP" "$NMAP_TMPDIR" "$RUN_DATETIME" "$DOMAIN" "$NMAP_TIMEOUT_SECONDS" <<'PY'
+python3 - "$SUBS" "$PORTS" "$NMAP_SCAN_TYPE" "$JSON_TEMP" "$NMAP_TMPDIR" "$RUN_DATETIME" "$DOMAINS" "$NMAP_TIMEOUT_SECONDS" <<'PY'
 import json
 import socket
 import subprocess
@@ -199,8 +254,14 @@ nmap_scan_type = sys.argv[3]
 json_temp = Path(sys.argv[4])
 nmap_tmpdir = Path(sys.argv[5])
 run_datetime = sys.argv[6]
-domain = sys.argv[7]
+domain_file = Path(sys.argv[7])
 nmap_timeout_seconds = int(sys.argv[8])
+
+domains = [
+    line.strip().lower()
+    for line in domain_file.read_text().splitlines()
+    if line.strip()
+]
 
 targets = [
     line.strip().lower()
@@ -328,12 +389,20 @@ for index, target in enumerate(targets, start=1):
 
 results = sorted(results, key=lambda item: item["target"])
 
-output = {
-    "domain": domain,
-    "source_ip": source_ip(),
-    "run_datetime": run_datetime,
-    "results": results,
-}
+if len(domains) == 1:
+    output = {
+        "domain": domains[0],
+        "source_ip": source_ip(),
+        "run_datetime": run_datetime,
+        "results": results,
+    }
+else:
+    output = {
+        "domains": domains,
+        "source_ip": source_ip(),
+        "run_datetime": run_datetime,
+        "results": results,
+    }
 
 json_text = json.dumps(output, indent=2)
 json_temp.write_text(json_text + "\n")
