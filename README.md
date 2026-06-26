@@ -12,18 +12,24 @@
 - Suppresses noisy output from `subfinder`, `amass`, and `nmap` while printing progress messages.
 - Writes colorized JSON to the console through `jq -C`.
 - Optionally saves plain valid JSON with no ANSI color codes.
+- Includes the local outbound source IP address and run date/time in the top-level JSON object.
 
 ## JSON schema
 
 ```json
-[
-  {
-    "target": "api.example.com",
-    "resolved": true,
-    "connected": true,
-    "ports": [80, 443]
-  }
-]
+{
+  "domain": "example.com",
+  "source_ip": "192.0.2.10",
+  "run_datetime": "6/26/2026 2:41 PM EDT",
+  "results": [
+    {
+      "target": "api.example.com",
+      "resolved": true,
+      "connected": true,
+      "ports": [80, 443]
+    }
+  ]
+}
 ```
 
 ## Dependencies
