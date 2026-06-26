@@ -6,10 +6,14 @@ PORTS="20,21,22,23,25,53,80,88,135,389,443,445,3389,5985,5986,8080,8081,8433"
 OUTJSON=false
 OUTDIR=""
 JSON_FILENAME="connectivity-results.json"
+NMAP_TIMEOUT_SECONDS=60
+
+GREEN=$'\033[32m'
+RESET=$'\033[0m'
+INFO_PREFIX="[${GREEN}+${RESET}]"
 
 REQUIRED_COMMANDS=(
 	subfinder
-	amass
 	nmap
 	python3
 	jq
@@ -141,31 +145,22 @@ cleanup() {
 trap cleanup EXIT
 
 SUBFINDER_RAW_SUBS="${WORKDIR}/subfinder-subdomains.raw.txt"
-AMASS_RAW_SUBS="${WORKDIR}/amass-subdomains.raw.txt"
-RAW_SUBS="${WORKDIR}/subdomains-combined.raw.txt"
 SUBS="${WORKDIR}/subdomains.txt"
 JSON_TEMP="${WORKDIR}/${JSON_FILENAME}"
 NMAP_TMPDIR="${WORKDIR}/nmap"
 
 mkdir -p "$NMAP_TMPDIR"
 
-echo "[+] Enumerating subdomains for ${DOMAIN}..." >&2
+printf '%s Enumerating subdomains for %s...\n' "$INFO_PREFIX" "$DOMAIN" >&2
 
 subfinder -d "$DOMAIN" -silent -o "$SUBFINDER_RAW_SUBS" >/dev/null 2>&1 || {
 	echo "[-] subfinder failed." >&2
 	exit 1
 }
 
-amass enum -passive -d "$DOMAIN" -o "$AMASS_RAW_SUBS" >/dev/null 2>&1 || {
-	echo "[!] amass failed; continuing with subfinder results." >&2
-	: >"$AMASS_RAW_SUBS"
-}
-
-cat "$SUBFINDER_RAW_SUBS" "$AMASS_RAW_SUBS" >"$RAW_SUBS"
-
 DOMAIN_REGEX="${DOMAIN//./\\.}"
 
-sed 's/\.$//' "$RAW_SUBS" |
+sed 's/\.$//' "$SUBFINDER_RAW_SUBS" |
 	tr '[:upper:]' '[:lower:]' |
 	grep -E "(^|\.)${DOMAIN_REGEX}$" |
 	sort -u >"$SUBS" || true
@@ -177,8 +172,8 @@ if [[ "$COUNT" -eq 0 ]]; then
 	exit 1
 fi
 
-echo "[+] Found ${COUNT} unique targets." >&2
-echo "[+] Testing connectivity..." >&2
+printf '%s Found %s unique targets.\n' "$INFO_PREFIX" "$COUNT" >&2
+printf '%s Testing connectivity...\n' "$INFO_PREFIX" >&2
 
 if [[ "${EUID}" -eq 0 ]]; then
 	NMAP_SCAN_TYPE="-sS"
@@ -188,7 +183,7 @@ fi
 
 RUN_DATETIME="$(date +"%m/%d/%Y %I:%M %p %Z" | sed -E 's#^0##; s#/0#/#; s# 0([0-9]):# \1:#')"
 
-python3 - "$SUBS" "$PORTS" "$NMAP_SCAN_TYPE" "$JSON_TEMP" "$NMAP_TMPDIR" "$RUN_DATETIME" "$DOMAIN" <<'PY'
+python3 - "$SUBS" "$PORTS" "$NMAP_SCAN_TYPE" "$JSON_TEMP" "$NMAP_TMPDIR" "$RUN_DATETIME" "$DOMAIN" "$NMAP_TIMEOUT_SECONDS" <<'PY'
 import json
 import socket
 import subprocess
@@ -196,7 +191,7 @@ import sys
 import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 target_file = Path(sys.argv[1])
 ports = sys.argv[2]
@@ -205,6 +200,7 @@ json_temp = Path(sys.argv[4])
 nmap_tmpdir = Path(sys.argv[5])
 run_datetime = sys.argv[6]
 domain = sys.argv[7]
+nmap_timeout_seconds = int(sys.argv[8])
 
 targets = [
     line.strip().lower()
@@ -214,14 +210,24 @@ targets = [
 
 results = []
 progress_color = "\033[36m"
+green_color = "\033[32m"
 reset_color = "\033[0m"
 
-def resolves(hostname: str) -> bool:
+
+def resolve_ip(hostname: str) -> Optional[str]:
     try:
-        socket.getaddrinfo(hostname, None)
-        return True
+        addresses = socket.getaddrinfo(hostname, None)
     except socket.gaierror:
-        return False
+        return None
+
+    for address in addresses:
+        ipaddress = address[4][0]
+
+        if ipaddress:
+            return ipaddress
+
+    return None
+
 
 def source_ip() -> Optional[str]:
     try:
@@ -231,18 +237,21 @@ def source_ip() -> Optional[str]:
     except OSError:
         return None
 
-def scan_host(hostname: str) -> list[int]:
+
+def scan_host(hostname: str) -> List[int]:
     with tempfile.NamedTemporaryFile(
         prefix="nmap-",
         suffix=".xml",
         dir=nmap_tmpdir,
-        delete=True
+        delete=True,
     ) as tmp:
         cmd = [
             "nmap",
             nmap_scan_type,
             "-Pn",
             "--open",
+            "--host-timeout",
+            f"{nmap_timeout_seconds}s",
             "-p",
             ports,
             hostname,
@@ -250,13 +259,17 @@ def scan_host(hostname: str) -> list[int]:
             tmp.name,
         ]
 
-        subprocess.run(
-            cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-            text=True,
-        )
+        try:
+            subprocess.run(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=nmap_timeout_seconds + 5,
+                text=True,
+            )
+        except subprocess.TimeoutExpired:
+            return []
 
         try:
             tree = ET.parse(tmp.name)
@@ -286,15 +299,18 @@ total = len(targets)
 
 for index, target in enumerate(targets, start=1):
     print(
-        f"{progress_color}[+] [{index}/{total}] Testing {target}{reset_color}",
+        f"{progress_color}[{green_color}+{progress_color}] "
+        f"[{index}/{total}] Testing {target}{reset_color}",
         file=sys.stderr
     )
 
-    is_resolved = resolves(target)
+    ipaddress = resolve_ip(target)
+    is_resolved = ipaddress is not None
 
     if not is_resolved:
         results.append({
             "target": target,
+            "ipaddress": "",
             "resolved": False,
             "connected": False,
             "ports": []
@@ -305,6 +321,7 @@ for index, target in enumerate(targets, start=1):
 
     results.append({
         "target": target,
+        "ipaddress": ipaddress,
         "resolved": True,
         "connected": len(open_ports) > 0,
         "ports": open_ports
@@ -334,7 +351,7 @@ if [[ "$OUTJSON" == true ]]; then
 	fi
 
 	cp "$JSON_TEMP" "$JSON_OUT"
-	echo "[+] JSON saved to: ${JSON_OUT}" >&2
+	printf '%s JSON saved to: %s\n' "$INFO_PREFIX" "$JSON_OUT" >&2
 fi
 
-echo "[+] Done." >&2
+printf '%s Done.\n' "$INFO_PREFIX" >&2
