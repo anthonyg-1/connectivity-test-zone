@@ -186,7 +186,9 @@ else
 	NMAP_SCAN_TYPE="-sT"
 fi
 
-python3 - "$SUBS" "$PORTS" "$NMAP_SCAN_TYPE" "$JSON_TEMP" "$NMAP_TMPDIR" <<'PY'
+RUN_DATETIME="$(date +"%m/%d/%Y %I:%M %p %Z" | sed -E 's#^0##; s#/0#/#; s# 0([0-9]):# \1:#')"
+
+python3 - "$SUBS" "$PORTS" "$NMAP_SCAN_TYPE" "$JSON_TEMP" "$NMAP_TMPDIR" "$RUN_DATETIME" "$DOMAIN" <<'PY'
 import json
 import socket
 import subprocess
@@ -194,12 +196,15 @@ import sys
 import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from typing import Optional
 
 target_file = Path(sys.argv[1])
 ports = sys.argv[2]
 nmap_scan_type = sys.argv[3]
 json_temp = Path(sys.argv[4])
 nmap_tmpdir = Path(sys.argv[5])
+run_datetime = sys.argv[6]
+domain = sys.argv[7]
 
 targets = [
     line.strip().lower()
@@ -217,6 +222,14 @@ def resolves(hostname: str) -> bool:
         return True
     except socket.gaierror:
         return False
+
+def source_ip() -> Optional[str]:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("8.8.8.8", 80))
+            return sock.getsockname()[0]
+    except OSError:
+        return None
 
 def scan_host(hostname: str) -> list[int]:
     with tempfile.NamedTemporaryFile(
@@ -299,7 +312,14 @@ for index, target in enumerate(targets, start=1):
 
 results = sorted(results, key=lambda item: item["target"])
 
-json_text = json.dumps(results, indent=2)
+output = {
+    "domain": domain,
+    "source_ip": source_ip(),
+    "run_datetime": run_datetime,
+    "results": results,
+}
+
+json_text = json.dumps(output, indent=2)
 json_temp.write_text(json_text + "\n")
 PY
 
