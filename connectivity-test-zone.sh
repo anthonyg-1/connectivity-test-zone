@@ -3,7 +3,7 @@ set -euo pipefail
 
 DOMAIN=""
 DOMAINS_FILE=""
-PORTS="20,21,22,23,25,53,80,88,135,389,443,445,3389,5985,5986,8080,8081,8433"
+PORTS="20,21,22,23,25,53,80,88,111,135,139,389,443,445,464,593,636,1433,1521,2049,2379,2380,3268,3269,3306,3389,5432,5672,5900,5985,5986,6379,6443,8000,8080,8081,8433,8443,9000,9200,9389,10250,27017"
 OUTJSON=false
 OUTDIR=""
 JSON_FILENAME="connectivity-results.json"
@@ -355,37 +355,41 @@ def scan_host(hostname: str) -> List[int]:
 
     return sorted(set(open_ports))
 
+
 total = len(targets)
 
 for index, target in enumerate(targets, start=1):
     print(
-        f"[{green_color}+{reset_color}] "
-        f"[{index}/{total}] Testing {target}",
-        file=sys.stderr
+        f"[{green_color}+{reset_color}] [{index}/{total}] Testing {target}",
+        file=sys.stderr,
     )
 
     ipaddress = resolve_ip(target)
     is_resolved = ipaddress is not None
 
     if not is_resolved:
-        results.append({
-            "target": target,
-            "ipaddress": "",
-            "resolved": False,
-            "connected": False,
-            "ports": []
-        })
+        results.append(
+            {
+                "target": target,
+                "ipaddress": "",
+                "resolved": False,
+                "connected": False,
+                "ports": [],
+            }
+        )
         continue
 
     open_ports = scan_host(target)
 
-    results.append({
-        "target": target,
-        "ipaddress": ipaddress,
-        "resolved": True,
-        "connected": len(open_ports) > 0,
-        "ports": open_ports
-    })
+    results.append(
+        {
+            "target": target,
+            "ipaddress": ipaddress,
+            "resolved": True,
+            "connected": len(open_ports) > 0,
+            "ports": open_ports,
+        }
+    )
 
 results = sorted(results, key=lambda item: item["target"])
 

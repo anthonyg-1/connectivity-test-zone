@@ -112,7 +112,7 @@ export PATH="$PATH:$HOME/go/bin"
 Default ports:
 
 ```text
-20,21,22,23,25,53,80,88,135,389,443,445,3389,5985,5986,8080,8081,8433
+20,21,22,23,25,53,80,88,111,135,139,389,443,445,464,593,636,1433,1521,2049,2379,2380,3268,3269,3306,3389,5432,5672,5900,5985,5986,6379,6443,8000,8080,8081,8433,8443,9000,9200,9389,10250,27017
 ```
 
 Use `--ports` or `-p` to override the default list.
@@ -153,4 +153,16 @@ The script does not leave persistent `.nmap`, `.gnmap`, or `.xml` files behind.
 bash -n connectivity-test-zone.sh
 shellcheck connectivity-test-zone.sh
 shfmt -d connectivity-test-zone.sh
+```
+
+The script also contains an embedded Python heredoc. Extract it before running
+Python linting and syntax checks:
+
+```bash
+awk \
+  '/<<'\''PY'\''/{flag=1; next} /^PY$/{flag=0} flag {print}' \
+  connectivity-test-zone.sh > /tmp/connectivity-test-zone-embedded.py
+ruff check /tmp/connectivity-test-zone-embedded.py
+ruff format --check /tmp/connectivity-test-zone-embedded.py
+python3 -m py_compile /tmp/connectivity-test-zone-embedded.py
 ```
