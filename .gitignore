@@ -1,0 +1,15 @@
+connectivity-results.json
+results/
+
+*.nmap
+*.gnmap
+*.xml
+
+.DS_Store
+Thumbs.db
+
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
