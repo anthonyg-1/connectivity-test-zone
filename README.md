@@ -1,12 +1,12 @@
 # connectivity-test-zone
 
-`connectivity-test-zone` enumerates DNS subdomains for a target domain,
+`connectivity-test-zone` enumerates DNS subdomains for one or more target domains,
 resolves each hostname, tests selected TCP ports, and emits JSON connectivity
 results.
 
 ## What it does
 
-- Runs `subfinder` for the supplied domain.
+- Runs `subfinder` for the supplied domain or each domain in a supplied text file.
 - Resolves each hostname before scanning.
 - Skips `nmap` for unresolved names.
 - Tests selected TCP ports with `nmap`.
@@ -99,6 +99,8 @@ export PATH="$PATH:$HOME/go/bin"
 ```bash
 ./connectivity-test-zone.sh --domain example.com
 ./connectivity-test-zone.sh -d example.com
+./connectivity-test-zone.sh --domains-file domains.txt
+./connectivity-test-zone.sh -df domains.txt
 ./connectivity-test-zone.sh --domain example.com --ports 22,80,443
 ./connectivity-test-zone.sh -d example.com -p 22,80,443
 ./connectivity-test-zone.sh --domain example.com --outjson
@@ -115,6 +117,10 @@ Default ports:
 
 Use `--ports` or `-p` to override the default list.
 
+Use `--domains-file` or `-df` to read root domains from a text file, one domain
+per line. Empty lines are ignored. If the file does not exist, the script exits
+with an error before scanning.
+
 ## Permissions
 
 The script uses `nmap -sS` when run as root and `nmap -sT` otherwise.
@@ -122,6 +128,9 @@ The script uses `nmap -sS` when run as root and `nmap -sT` otherwise.
 ## Output
 
 Console JSON is colorized through `jq -C`. Saved JSON is plain valid JSON.
+
+Single-domain runs include a top-level `domain` string. File-based runs with
+more than one domain include a top-level `domains` array.
 
 If `--outjson` is present, the script saves `connectivity-results.json`.
 If `--outdir` is also provided, the JSON file is saved in that directory.
