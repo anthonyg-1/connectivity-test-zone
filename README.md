@@ -7,7 +7,6 @@ results.
 ## What it does
 
 - Runs `subfinder` for the supplied domain.
-- Deduplicates discovered DNS names.
 - Resolves each hostname before scanning.
 - Skips `nmap` for unresolved names.
 - Tests selected TCP ports with `nmap`.
