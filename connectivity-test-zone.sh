@@ -209,7 +209,6 @@ targets = [
 ]
 
 results = []
-progress_color = "\033[36m"
 green_color = "\033[32m"
 reset_color = "\033[0m"
 
@@ -299,8 +298,8 @@ total = len(targets)
 
 for index, target in enumerate(targets, start=1):
     print(
-        f"{progress_color}[{green_color}+{progress_color}] "
-        f"[{index}/{total}] Testing {target}{reset_color}",
+        f"[{green_color}+{reset_color}] "
+        f"[{index}/{total}] Testing {target}",
         file=sys.stderr
     )
 
