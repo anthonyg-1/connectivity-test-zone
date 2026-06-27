@@ -7,6 +7,8 @@ results.
 ## What it does
 
 - Runs `subfinder` for the supplied domain or each domain in a supplied text file.
+- Optionally brute-forces DNS names with `dnsx` and a supplied wordlist, then
+  merges those results with `subfinder` output.
 - Resolves each hostname before scanning.
 - Skips `nmap` for unresolved names.
 - Tests selected TCP ports with `nmap`.
@@ -37,8 +39,9 @@ results.
 
 ## Dependencies
 
-- `subfinder`
+- `dnsx` when using `--wordlist`
 - `nmap`
+- `subfinder`
 - `python3`
 - `jq`
 - `sed`
@@ -67,6 +70,12 @@ Install `subfinder` with Go:
 go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
 ```
 
+Install `dnsx` with Go:
+
+```bash
+go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest
+```
+
 Ensure your Go binary path is on `PATH`. A common setup is:
 
 ```bash
@@ -88,6 +97,12 @@ Install `subfinder` with Go:
 go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
 ```
 
+Install `dnsx` with Go:
+
+```bash
+go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest
+```
+
 Ensure your Go binary path is on `PATH`. A common setup is:
 
 ```bash
@@ -101,6 +116,10 @@ export PATH="$PATH:$HOME/go/bin"
 ./connectivity-test-zone.sh -d example.com
 ./connectivity-test-zone.sh --domains-file domains.txt
 ./connectivity-test-zone.sh -df domains.txt
+./connectivity-test-zone.sh --domain example.com --wordlist ad-dns.txt
+./connectivity-test-zone.sh -d example.com -wl ad-dns.txt
+./connectivity-test-zone.sh -df domains.txt -wl wordlist.txt -oj
+./connectivity-test-zone.sh -df domains.txt -wl ad-dns.txt -r 10.0.0.10,10.0.0.11
 ./connectivity-test-zone.sh --domain example.com --ports 22,80,443
 ./connectivity-test-zone.sh -d example.com -p 22,80,443
 ./connectivity-test-zone.sh --domain example.com --outjson
@@ -120,6 +139,16 @@ Use `--ports` or `-p` to override the default list.
 Use `--domains-file` or `-df` to read root domains from a text file, one domain
 per line. Empty lines are ignored. If the file does not exist, the script exits
 with an error before scanning.
+
+Use `--wordlist` or `-wl` to run active DNS brute-force enumeration with `dnsx`
+in addition to the passive `subfinder` enumeration. The wordlist should contain
+subdomain labels such as `dc01`, `ldap`, or `vpn`, one per line. Resolved names
+from `dnsx` are merged with `subfinder` results and deduplicated before the
+connectivity scan.
+
+Use `--resolvers` or `-r` with `--wordlist` to send the active `dnsx` queries to
+specific DNS resolvers. This can be a comma-separated resolver list or a resolver
+file accepted by `dnsx`.
 
 ## Permissions
 
