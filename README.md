@@ -111,21 +111,39 @@ export PATH="$PATH:$HOME/go/bin"
 
 ## Usage
 
-```bash
-./connectivity-test-zone.sh --domain example.com
+```console
+./connectivity-test-zone.sh -h
+```
+
+This will display help for the tool. Here are all the switches it supports.
+
+```text
+Usage:
+  ./connectivity-test-zone.sh --domain example.com [options]
+  ./connectivity-test-zone.sh -d example.com [options]
+  ./connectivity-test-zone.sh --domains-file domains.txt [options]
+  ./connectivity-test-zone.sh -df domains.txt [options]
+
+Options:
+  -d,  --domain           DNS zone / root domain to enumerate
+  -df, --domains-file     Text file containing DNS zones / root domains to enumerate
+  -wl, --wordlist         Optional DNS brute-force wordlist.
+                          Runs active dnsx enumeration in addition to subfinder.
+  -r,  --resolvers        Optional resolver list for dnsx.
+                          Comma-separated resolvers or a resolvers file.
+  -p,  --ports            Comma-separated ports to test
+  -oj, --outjson          Save JSON output to a file
+  -od, --outdir           Output directory for JSON file
+                          Only used when --outjson is present
+                          Default with --outjson: current directory
+  -h,  --help             Help
+```
+
+Common runs:
+
+```console
 ./connectivity-test-zone.sh -d example.com
-./connectivity-test-zone.sh --domains-file domains.txt
-./connectivity-test-zone.sh -df domains.txt
-./connectivity-test-zone.sh --domain example.com --wordlist ad-dns.txt
-./connectivity-test-zone.sh -d example.com -wl ad-dns.txt
 ./connectivity-test-zone.sh -df domains.txt -wl wordlist.txt -oj
-./connectivity-test-zone.sh -df domains.txt -wl ad-dns.txt -r 10.0.0.10,10.0.0.11
-./connectivity-test-zone.sh --domain example.com --ports 22,80,443
-./connectivity-test-zone.sh -d example.com -p 22,80,443
-./connectivity-test-zone.sh --domain example.com --outjson
-./connectivity-test-zone.sh -d example.com -oj
-./connectivity-test-zone.sh --domain example.com --outjson --outdir ./results
-./connectivity-test-zone.sh -d example.com -oj -od ./results
 ```
 
 Default ports:
