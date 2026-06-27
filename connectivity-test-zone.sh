@@ -3,6 +3,8 @@ set -euo pipefail
 
 DOMAIN=""
 DOMAINS_FILE=""
+WORDLIST=""
+RESOLVERS=""
 PORTS="20,21,22,23,25,53,80,88,111,135,139,389,443,445,464,593,636,1433,1521,2049,2379,2380,3268,3269,3306,3389,5432,5672,5900,5985,5986,6379,6443,8000,8080,8081,8433,8443,9000,9200,9389,10250,27017"
 OUTJSON=false
 OUTDIR=""
@@ -43,6 +45,10 @@ Usage:
 Options:
   -d,  --domain           DNS zone / root domain to enumerate
   -df, --domains-file     Text file containing DNS zones / root domains to enumerate
+  -wl, --wordlist         Optional DNS brute-force wordlist.
+                          Runs active dnsx enumeration in addition to subfinder.
+  -r,  --resolvers        Optional resolver list for dnsx.
+                          Comma-separated resolvers or a resolvers file.
   -p,  --ports            Comma-separated ports to test
                           Default: ${PORTS}
   -oj, --outjson          Save JSON output to a file
@@ -56,6 +62,9 @@ Examples:
   ${SCRIPT_NAME} -d example.com
   ${SCRIPT_NAME} --domains-file domains.txt
   ${SCRIPT_NAME} -df domains.txt
+  ${SCRIPT_NAME} --domain example.com --wordlist ad-dns.txt
+  ${SCRIPT_NAME} -d example.com -wl ad-dns.txt
+  ${SCRIPT_NAME} -df domains.txt -wl ad-dns.txt -r 10.0.0.10,10.0.0.11
   ${SCRIPT_NAME} --domain example.com --ports 22,80,443
   ${SCRIPT_NAME} -d example.com -p 22,80,443
   ${SCRIPT_NAME} --domain example.com --outjson
@@ -67,8 +76,13 @@ EOF
 
 check_dependencies() {
 	local missing=()
+	local required_commands=("${REQUIRED_COMMANDS[@]}")
 
-	for cmd in "${REQUIRED_COMMANDS[@]}"; do
+	if [[ -n "$WORDLIST" ]]; then
+		required_commands+=(dnsx)
+	fi
+
+	for cmd in "${required_commands[@]}"; do
 		if ! command -v "$cmd" >/dev/null 2>&1; then
 			missing+=("$cmd")
 		fi
@@ -109,6 +123,21 @@ validate_input() {
 		echo "[-] Domains file is not readable: $DOMAINS_FILE" >&2
 		exit 1
 	fi
+
+	if [[ -n "$WORDLIST" && ! -f "$WORDLIST" ]]; then
+		echo "[-] Wordlist does not exist: $WORDLIST" >&2
+		exit 1
+	fi
+
+	if [[ -n "$WORDLIST" && ! -r "$WORDLIST" ]]; then
+		echo "[-] Wordlist is not readable: $WORDLIST" >&2
+		exit 1
+	fi
+
+	if [[ -n "$RESOLVERS" && -z "$WORDLIST" ]]; then
+		echo "[-] --resolvers can only be used with --wordlist." >&2
+		exit 1
+	fi
 }
 
 require_option_value() {
@@ -133,6 +162,16 @@ parse_args() {
 		-df | --domains-file)
 			require_option_value "$1" "${2:-}"
 			DOMAINS_FILE="${2:-}"
+			shift 2
+			;;
+		-wl | --wordlist)
+			require_option_value "$1" "${2:-}"
+			WORDLIST="${2:-}"
+			shift 2
+			;;
+		-r | --resolvers)
+			require_option_value "$1" "${2:-}"
+			RESOLVERS="${2:-}"
 			shift 2
 			;;
 		-p | --ports)
@@ -199,12 +238,22 @@ if [[ "$DOMAIN_COUNT" -eq 0 ]]; then
 	exit 1
 fi
 
+printf '%s Loaded %s DNS zone(s).\n' "$INFO_PREFIX" "$DOMAIN_COUNT" >&2
+
 while IFS= read -r ROOT_DOMAIN; do
-	printf '%s Enumerating subdomains for %s...\n' "$INFO_PREFIX" "$ROOT_DOMAIN" >&2
+	printf '%s Running passive enumeration for %s...\n' "$INFO_PREFIX" "$ROOT_DOMAIN" >&2
 
 	SUBFINDER_DOMAIN_RAW_SUBS="${WORKDIR}/subfinder-${ROOT_DOMAIN}.raw.txt"
+	DOMAIN_SUBS="${WORKDIR}/subdomains-${ROOT_DOMAIN}.txt"
+	SUBFINDER_DOMAIN_SUBS="${WORKDIR}/subfinder-${ROOT_DOMAIN}.filtered.txt"
+	DNSX_DOMAIN_CANDIDATES="${WORKDIR}/dnsx-${ROOT_DOMAIN}.candidates.txt"
+	DNSX_DOMAIN_SUBS="${WORKDIR}/dnsx-${ROOT_DOMAIN}.filtered.txt"
+	DNSX_DOMAIN_RAW_SUBS="${WORKDIR}/dnsx-${ROOT_DOMAIN}.raw.txt"
+	: >"$DOMAIN_SUBS"
+	: >"$SUBFINDER_DOMAIN_SUBS"
+	: >"$DNSX_DOMAIN_SUBS"
 
-	subfinder -d "$ROOT_DOMAIN" -silent -o "$SUBFINDER_DOMAIN_RAW_SUBS" >/dev/null 2>&1 || {
+	subfinder -d "$ROOT_DOMAIN" -silent -o "$SUBFINDER_DOMAIN_RAW_SUBS" </dev/null >/dev/null 2>&1 || {
 		echo "[-] subfinder failed for $ROOT_DOMAIN." >&2
 		exit 1
 	}
@@ -215,7 +264,71 @@ while IFS= read -r ROOT_DOMAIN; do
 
 	sed 's/\.$//' "$SUBFINDER_DOMAIN_RAW_SUBS" |
 		tr '[:upper:]' '[:lower:]' |
-		grep -E "(^|\.)${DOMAIN_REGEX}$" >>"$SUBS" || true
+		grep -E "(^|\.)${DOMAIN_REGEX}$" >"$SUBFINDER_DOMAIN_SUBS" || true
+
+	SUBFINDER_TARGET_COUNT="$(wc -l <"$SUBFINDER_DOMAIN_SUBS" | tr -d ' ')"
+	printf '%s Passive enumeration found %s target(s) for %s.\n' "$INFO_PREFIX" "$SUBFINDER_TARGET_COUNT" "$ROOT_DOMAIN" >&2
+	cat "$SUBFINDER_DOMAIN_SUBS" >>"$DOMAIN_SUBS"
+
+	if [[ -n "$WORDLIST" ]]; then
+		printf '%s Running active DNS enumeration for %s...\n' "$INFO_PREFIX" "$ROOT_DOMAIN" >&2
+
+		python3 - "$WORDLIST" "$ROOT_DOMAIN" "$DNSX_DOMAIN_CANDIDATES" <<'PY'
+import sys
+from pathlib import Path
+
+wordlist = Path(sys.argv[1])
+root_domain = sys.argv[2].strip().lower().rstrip(".")
+candidate_file = Path(sys.argv[3])
+suffix = f".{root_domain}"
+candidates = set()
+
+for line in wordlist.read_text().splitlines():
+    word = line.strip().lower().rstrip(".")
+
+    if not word or word.startswith("#"):
+        continue
+
+    if word == root_domain or word.endswith(suffix):
+        candidate = word
+    else:
+        candidate = f"{word}.{root_domain}"
+
+    candidates.add(candidate)
+
+candidate_file.write_text("\n".join(sorted(candidates)) + "\n")
+PY
+
+		DNSX_ARGS=(-l "$DNSX_DOMAIN_CANDIDATES" -silent -o "$DNSX_DOMAIN_RAW_SUBS")
+
+		if [[ -n "$RESOLVERS" ]]; then
+			DNSX_ARGS+=(-r "$RESOLVERS")
+		fi
+
+		dnsx "${DNSX_ARGS[@]}" </dev/null >/dev/null 2>&1 || {
+			echo "[-] dnsx failed for $ROOT_DOMAIN." >&2
+			exit 1
+		}
+
+		sed 's/\.$//' "$DNSX_DOMAIN_RAW_SUBS" |
+			tr '[:upper:]' '[:lower:]' |
+			grep -E "(^|\.)${DOMAIN_REGEX}$" >"$DNSX_DOMAIN_SUBS" || true
+
+		DNSX_TARGET_COUNT="$(wc -l <"$DNSX_DOMAIN_SUBS" | tr -d ' ')"
+		printf '%s Active DNS enumeration found %s target(s) for %s.\n' "$INFO_PREFIX" "$DNSX_TARGET_COUNT" "$ROOT_DOMAIN" >&2
+		cat "$DNSX_DOMAIN_SUBS" >>"$DOMAIN_SUBS"
+	fi
+
+	sort -u -o "$DOMAIN_SUBS" "$DOMAIN_SUBS"
+	DOMAIN_TARGET_COUNT="$(wc -l <"$DOMAIN_SUBS" | tr -d ' ')"
+
+	if [[ "$DOMAIN_TARGET_COUNT" -eq 0 ]]; then
+		printf '%s No targets found for %s; continuing.\n' "$INFO_PREFIX" "$ROOT_DOMAIN" >&2
+		continue
+	fi
+
+	printf '%s Found %s unique targets for %s.\n' "$INFO_PREFIX" "$DOMAIN_TARGET_COUNT" "$ROOT_DOMAIN" >&2
+	cat "$DOMAIN_SUBS" >>"$SUBS"
 done <"$DOMAINS"
 
 sort -u -o "$SUBS" "$SUBS"
