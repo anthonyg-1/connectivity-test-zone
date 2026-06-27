@@ -4,6 +4,11 @@
 resolves each hostname, tests selected TCP ports, and emits JSON connectivity
 results.
 
+## Responsible use
+
+Use this tool only for authorized security testing, asset inventory, and network
+administration. See [DISCLAIMER.md](DISCLAIMER.md) for details.
+
 ## What it does
 
 - Runs `subfinder` for the supplied domain or each domain in a supplied text file.
