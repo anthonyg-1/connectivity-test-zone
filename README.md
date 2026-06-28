@@ -14,10 +14,13 @@ administration. See [DISCLAIMER.md](DISCLAIMER.md) for details.
 - Runs `subfinder` for the supplied domain or each domain in a supplied text file.
 - Optionally brute-forces DNS names with `dnsx` and a supplied wordlist, then
   merges those results with `subfinder` output.
+- Optionally enumerates HTTP virtual hosts, then merges those results with the
+  other discovered names.
 - Resolves each hostname before scanning.
 - Skips `nmap` for unresolved names.
 - Tests selected TCP ports with `nmap`.
-- Suppresses noisy output from `subfinder` and `nmap` while printing progress messages.
+- Suppresses noisy output from enumeration tools and `nmap` while printing
+  progress messages.
 - Writes colorized JSON to the console through `jq -C`.
 - Optionally saves plain valid JSON with no ANSI color codes.
 - Includes the local outbound source IP address and run date/time in the
@@ -45,6 +48,7 @@ administration. See [DISCLAIMER.md](DISCLAIMER.md) for details.
 ## Dependencies
 
 - `dnsx` when using `--wordlist`
+- `gobuster` when using `--vhosts` or `--vhost-wordlist`
 - `nmap`
 - `subfinder`
 - `python3`
@@ -66,7 +70,7 @@ administration. See [DISCLAIMER.md](DISCLAIMER.md) for details.
 Install common dependencies with Homebrew:
 
 ```bash
-brew install jq nmap shellcheck shfmt
+brew install gobuster jq nmap shellcheck shfmt
 ```
 
 Install `subfinder` with Go:
@@ -93,7 +97,7 @@ On Debian/Ubuntu, install common packages with:
 
 ```bash
 sudo apt update
-sudo apt install -y jq nmap python3 sed grep coreutils findutils
+sudo apt install -y gobuster jq nmap python3 sed grep coreutils findutils
 ```
 
 Install `subfinder` with Go:
@@ -136,6 +140,14 @@ Options:
                           Runs active dnsx enumeration in addition to subfinder.
   -r,  --resolvers        Optional resolver list for dnsx.
                           Comma-separated resolvers or a resolvers file.
+  -vh, --vhosts           Run vhost enumeration.
+                          Defaults to ./vhost-wordlist.txt beside the script.
+  -vwl,--vhost-wordlist   Optional vhost wordlist.
+                          Implies --vhosts.
+  -vs, --vhost-scheme     URL scheme for vhost checks.
+                          Default: https
+  -vu, --vhost-url        Optional base URL for vhost checks.
+                          Useful when the root domain does not resolve.
   -p,  --ports            Comma-separated ports to test
   -oj, --outjson          Save JSON output to a file
   -od, --outdir           Output directory for JSON file
@@ -147,8 +159,23 @@ Options:
 Common runs:
 
 ```console
+./connectivity-test-zone.sh --domain example.com
 ./connectivity-test-zone.sh -d example.com
+./connectivity-test-zone.sh --domains-file domains.txt
+./connectivity-test-zone.sh -df domains.txt
+./connectivity-test-zone.sh --domain example.com --wordlist ad-dns.txt
+./connectivity-test-zone.sh -d example.com -wl ad-dns.txt
 ./connectivity-test-zone.sh -df domains.txt -wl wordlist.txt -oj
+./connectivity-test-zone.sh -df domains.txt -wl ad-dns.txt -r 10.0.0.10,10.0.0.11
+./connectivity-test-zone.sh --domain example.com --vhosts
+./connectivity-test-zone.sh -d example.com -vh -vwl vhost-wordlist.txt
+./connectivity-test-zone.sh -d example.com --vhosts --vhost-url https://192.0.2.10
+./connectivity-test-zone.sh --domain example.com --ports 22,80,443
+./connectivity-test-zone.sh -d example.com -p 22,80,443
+./connectivity-test-zone.sh --domain example.com --outjson
+./connectivity-test-zone.sh -d example.com -oj
+./connectivity-test-zone.sh --domain example.com --outjson --outdir ./results
+./connectivity-test-zone.sh -d example.com -oj -od ./results
 ```
 
 Default ports:
@@ -172,6 +199,19 @@ connectivity scan.
 Use `--resolvers` or `-r` with `--wordlist` to send the active `dnsx` queries to
 specific DNS resolvers. This can be a comma-separated resolver list or a resolver
 file accepted by `dnsx`.
+
+Use `--vhosts` or `-vh` to run vhost enumeration for each root domain.
+By default this uses the bundled `vhost-wordlist.txt`. Use `--vhost-wordlist` or
+`-vwl` to provide a custom list. Vhost results are filtered to names inside the
+current root domain and merged with other discovered targets before the
+connectivity scan.
+
+Use `--vhost-scheme` or `-vs` to choose the base URL scheme used for vhost
+checks. The default is `https`; valid values are `http` and `https`.
+
+Use `--vhost-url` or `-vu` when the root domain itself does not resolve but you
+know the web server URL or IP address to probe. The vhost check appends and tests
+hostnames under each root domain.
 
 ## Permissions
 
@@ -207,14 +247,18 @@ shellcheck connectivity-test-zone.sh
 shfmt -d connectivity-test-zone.sh
 ```
 
-The script also contains an embedded Python heredoc. Extract it before running
+The script also contains embedded Python heredocs. Extract them before running
 Python linting and syntax checks:
 
 ```bash
-awk \
-  '/<<'\''PY'\''/{flag=1; next} /^PY$/{flag=0} flag {print}' \
-  connectivity-test-zone.sh > /tmp/connectivity-test-zone-embedded.py
-ruff check /tmp/connectivity-test-zone-embedded.py
-ruff format --check /tmp/connectivity-test-zone-embedded.py
-python3 -m py_compile /tmp/connectivity-test-zone-embedded.py
+awk '
+  /<<'\''PY'\''/ { count++; flag=1; next }
+  /^PY$/ { flag=0; next }
+  flag {
+    print > ("/tmp/connectivity-test-zone-embedded-" count ".py")
+  }
+' connectivity-test-zone.sh
+ruff check /tmp/connectivity-test-zone-embedded-*.py
+ruff format --check /tmp/connectivity-test-zone-embedded-*.py
+python3 -m py_compile /tmp/connectivity-test-zone-embedded-*.py
 ```

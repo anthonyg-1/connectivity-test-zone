@@ -5,16 +5,23 @@ DOMAIN=""
 DOMAINS_FILE=""
 WORDLIST=""
 RESOLVERS=""
+VHOSTS=false
+VHOST_WORDLIST=""
+VHOST_SCHEME="https"
+VHOST_URL=""
 PORTS="20,21,22,23,25,53,80,88,111,135,139,389,443,445,464,593,636,1433,1521,2049,2379,2380,3268,3269,3306,3389,5432,5672,5900,5985,5986,6379,6443,8000,8080,8081,8433,8443,9000,9200,9389,10250,27017"
 OUTJSON=false
 OUTDIR=""
 JSON_FILENAME="connectivity-results.json"
 NMAP_TIMEOUT_SECONDS=60
 SCRIPT_NAME="./connectivity-test-zone.sh"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 GREEN=$'\033[32m'
+RED=$'\033[31m'
 RESET=$'\033[0m'
 INFO_PREFIX="[${GREEN}+${RESET}]"
+WARN_PREFIX="[${RED}!${RESET}]"
 
 REQUIRED_COMMANDS=(
 	subfinder
@@ -49,6 +56,14 @@ Options:
                           Runs active dnsx enumeration in addition to subfinder.
   -r,  --resolvers        Optional resolver list for dnsx.
                           Comma-separated resolvers or a resolvers file.
+  -vh, --vhosts           Run vhost enumeration.
+                          Defaults to ${SCRIPT_DIR}/vhost-wordlist.txt.
+  -vwl,--vhost-wordlist   Optional vhost wordlist.
+                          Implies --vhosts.
+  -vs, --vhost-scheme     URL scheme for vhost checks.
+                          Default: ${VHOST_SCHEME}
+  -vu, --vhost-url        Optional base URL for vhost checks.
+                          Useful when the root domain does not resolve.
   -p,  --ports            Comma-separated ports to test
                           Default: ${PORTS}
   -oj, --outjson          Save JSON output to a file
@@ -65,6 +80,9 @@ Examples:
   ${SCRIPT_NAME} --domain example.com --wordlist ad-dns.txt
   ${SCRIPT_NAME} -d example.com -wl ad-dns.txt
   ${SCRIPT_NAME} -df domains.txt -wl ad-dns.txt -r 10.0.0.10,10.0.0.11
+  ${SCRIPT_NAME} --domain example.com --vhosts
+  ${SCRIPT_NAME} -d example.com -vh -vwl vhost-wordlist.txt
+  ${SCRIPT_NAME} -d example.com -vh -vu https://192.0.2.10
   ${SCRIPT_NAME} --domain example.com --ports 22,80,443
   ${SCRIPT_NAME} -d example.com -p 22,80,443
   ${SCRIPT_NAME} --domain example.com --outjson
@@ -80,6 +98,10 @@ check_dependencies() {
 
 	if [[ -n "$WORDLIST" ]]; then
 		required_commands+=(dnsx)
+	fi
+
+	if [[ "$VHOSTS" == true ]]; then
+		required_commands+=(gobuster)
 	fi
 
 	for cmd in "${required_commands[@]}"; do
@@ -138,6 +160,25 @@ validate_input() {
 		echo "[-] --resolvers can only be used with --wordlist." >&2
 		exit 1
 	fi
+
+	if [[ "$VHOSTS" == true && -z "$VHOST_WORDLIST" ]]; then
+		VHOST_WORDLIST="${SCRIPT_DIR}/vhost-wordlist.txt"
+	fi
+
+	if [[ "$VHOSTS" == true && ! -f "$VHOST_WORDLIST" ]]; then
+		echo "[-] Vhost wordlist does not exist: $VHOST_WORDLIST" >&2
+		exit 1
+	fi
+
+	if [[ "$VHOSTS" == true && ! -r "$VHOST_WORDLIST" ]]; then
+		echo "[-] Vhost wordlist is not readable: $VHOST_WORDLIST" >&2
+		exit 1
+	fi
+
+	if [[ "$VHOST_SCHEME" != "http" && "$VHOST_SCHEME" != "https" ]]; then
+		echo "[-] --vhost-scheme must be either http or https." >&2
+		exit 1
+	fi
 }
 
 require_option_value() {
@@ -174,6 +215,27 @@ parse_args() {
 			RESOLVERS="${2:-}"
 			shift 2
 			;;
+		-vh | --vhosts)
+			VHOSTS=true
+			shift
+			;;
+		-vwl | --vhost-wordlist)
+			require_option_value "$1" "${2:-}"
+			VHOSTS=true
+			VHOST_WORDLIST="${2:-}"
+			shift 2
+			;;
+		-vs | --vhost-scheme)
+			require_option_value "$1" "${2:-}"
+			VHOST_SCHEME="${2:-}"
+			shift 2
+			;;
+		-vu | --vhost-url)
+			require_option_value "$1" "${2:-}"
+			VHOSTS=true
+			VHOST_URL="${2:-}"
+			shift 2
+			;;
 		-p | --ports)
 			require_option_value "$1" "${2:-}"
 			PORTS="${2:-}"
@@ -199,6 +261,176 @@ parse_args() {
 			;;
 		esac
 	done
+}
+
+target_count() {
+	local target_file="$1"
+
+	wc -l <"$target_file" | tr -d ' '
+}
+
+filter_domain_hosts() {
+	local raw_file="$1"
+	local root_domain="$2"
+	local filtered_file="$3"
+	local domain_regex
+
+	domain_regex="${root_domain//./\\.}"
+
+	sed 's/\.$//' "$raw_file" |
+		tr '[:upper:]' '[:lower:]' |
+		grep -E "(^|\.)${domain_regex}$" >"$filtered_file" || true
+}
+
+run_subfinder_enum() {
+	local root_domain="$1"
+	local domain_subs="$2"
+	local raw_file="${WORKDIR}/subfinder-${root_domain}.raw.txt"
+	local filtered_file="${WORKDIR}/subfinder-${root_domain}.filtered.txt"
+	local found_count
+
+	printf '%s Running passive enumeration for %s...\n' "$INFO_PREFIX" "$root_domain" >&2
+	: >"$filtered_file"
+
+	subfinder -d "$root_domain" -silent -o "$raw_file" </dev/null >/dev/null 2>&1 || {
+		echo "[-] subfinder failed for $root_domain." >&2
+		exit 1
+	}
+
+	cat "$raw_file" >>"$SUBFINDER_RAW_SUBS"
+	filter_domain_hosts "$raw_file" "$root_domain" "$filtered_file"
+
+	found_count="$(target_count "$filtered_file")"
+	printf '%s Passive enumeration found %s target(s) for %s.\n' "$INFO_PREFIX" "$found_count" "$root_domain" >&2
+	cat "$filtered_file" >>"$domain_subs"
+}
+
+run_dnsx_enum() {
+	local root_domain="$1"
+	local domain_subs="$2"
+	local candidates_file="${WORKDIR}/dnsx-${root_domain}.candidates.txt"
+	local raw_file="${WORKDIR}/dnsx-${root_domain}.raw.txt"
+	local filtered_file="${WORKDIR}/dnsx-${root_domain}.filtered.txt"
+	local found_count
+	local dnsx_args
+
+	if [[ -z "$WORDLIST" ]]; then
+		return 0
+	fi
+
+	printf '%s Running active DNS enumeration for %s...\n' "$INFO_PREFIX" "$root_domain" >&2
+	: >"$filtered_file"
+
+	python3 - "$WORDLIST" "$root_domain" "$candidates_file" <<'PY'
+import sys
+from pathlib import Path
+
+wordlist = Path(sys.argv[1])
+root_domain = sys.argv[2].strip().lower().rstrip(".")
+candidate_file = Path(sys.argv[3])
+suffix = f".{root_domain}"
+candidates = set()
+
+for line in wordlist.read_text().splitlines():
+    word = line.strip().lower().rstrip(".")
+
+    if not word or word.startswith("#"):
+        continue
+
+    if word == root_domain or word.endswith(suffix):
+        candidate = word
+    else:
+        candidate = f"{word}.{root_domain}"
+
+    candidates.add(candidate)
+
+candidate_file.write_text("\n".join(sorted(candidates)) + "\n")
+PY
+
+	dnsx_args=(-l "$candidates_file" -silent -o "$raw_file")
+
+	if [[ -n "$RESOLVERS" ]]; then
+		dnsx_args+=(-r "$RESOLVERS")
+	fi
+
+	dnsx "${dnsx_args[@]}" </dev/null >/dev/null 2>&1 || {
+		echo "[-] dnsx failed for $root_domain." >&2
+		exit 1
+	}
+
+	filter_domain_hosts "$raw_file" "$root_domain" "$filtered_file"
+
+	found_count="$(target_count "$filtered_file")"
+	printf '%s Active DNS enumeration found %s target(s) for %s.\n' "$INFO_PREFIX" "$found_count" "$root_domain" >&2
+	cat "$filtered_file" >>"$domain_subs"
+}
+
+run_gobuster_vhost_enum() {
+	local root_domain="$1"
+	local domain_subs="$2"
+	local raw_file="${WORKDIR}/gobuster-${root_domain}.raw.txt"
+	local filtered_file="${WORKDIR}/gobuster-${root_domain}.filtered.txt"
+	local error_file="${WORKDIR}/gobuster-${root_domain}.err.txt"
+	local gobuster_url
+	local gobuster_error
+	local found_count
+
+	if [[ "$VHOSTS" != true ]]; then
+		return 0
+	fi
+
+	printf '%s Running vhost enumeration for %s...\n' "$INFO_PREFIX" "$root_domain" >&2
+	: >"$filtered_file"
+
+	gobuster_url="${VHOST_URL:-${VHOST_SCHEME}://${root_domain}}"
+
+	if ! gobuster vhost \
+		--url "$gobuster_url" \
+		--wordlist "$VHOST_WORDLIST" \
+		--append-domain \
+		--domain "$root_domain" \
+		--quiet \
+		--no-progress \
+		--no-error \
+		--no-color \
+		--output "$raw_file" </dev/null >/dev/null 2>"$error_file"; then
+		if grep -q -e 'no such host' -e 'timeout occurred during the request' "$error_file"; then
+			return 0
+		fi
+
+		gobuster_error="$(sed -n '1p' "$error_file")"
+		printf '%s Vhost enumeration failed for %s; continuing. %s\n' "$WARN_PREFIX" "$root_domain" "$gobuster_error" >&2
+		return 0
+	fi
+
+	python3 - "$raw_file" "$root_domain" "$filtered_file" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+raw_file = Path(sys.argv[1])
+root_domain = sys.argv[2].strip().lower().rstrip(".")
+output_file = Path(sys.argv[3])
+suffix = f".{re.escape(root_domain)}"
+host_pattern = re.compile(
+    rf"\b[a-z0-9](?:[a-z0-9-]{{0,61}}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{{0,61}}[a-z0-9])?)*{suffix}\b",
+    re.IGNORECASE,
+)
+hosts = set()
+
+for line in raw_file.read_text(errors="ignore").splitlines():
+    for match in host_pattern.finditer(line.lower().rstrip(".")):
+        host = match.group(0).rstrip(".")
+
+        if host == root_domain or host.endswith(f".{root_domain}"):
+            hosts.add(host)
+
+output_file.write_text("\n".join(sorted(hosts)) + ("\n" if hosts else ""))
+PY
+
+	found_count="$(target_count "$filtered_file")"
+	printf '%s Vhost enumeration found %s target(s) for %s.\n' "$INFO_PREFIX" "$found_count" "$root_domain" >&2
+	cat "$filtered_file" >>"$domain_subs"
 }
 
 parse_args "$@"
@@ -241,86 +473,14 @@ fi
 printf '%s Loaded %s DNS zone(s).\n' "$INFO_PREFIX" "$DOMAIN_COUNT" >&2
 
 while IFS= read -r ROOT_DOMAIN; do
-	printf '%s Running passive enumeration for %s...\n' "$INFO_PREFIX" "$ROOT_DOMAIN" >&2
-
-	SUBFINDER_DOMAIN_RAW_SUBS="${WORKDIR}/subfinder-${ROOT_DOMAIN}.raw.txt"
 	DOMAIN_SUBS="${WORKDIR}/subdomains-${ROOT_DOMAIN}.txt"
-	SUBFINDER_DOMAIN_SUBS="${WORKDIR}/subfinder-${ROOT_DOMAIN}.filtered.txt"
-	DNSX_DOMAIN_CANDIDATES="${WORKDIR}/dnsx-${ROOT_DOMAIN}.candidates.txt"
-	DNSX_DOMAIN_SUBS="${WORKDIR}/dnsx-${ROOT_DOMAIN}.filtered.txt"
-	DNSX_DOMAIN_RAW_SUBS="${WORKDIR}/dnsx-${ROOT_DOMAIN}.raw.txt"
 	: >"$DOMAIN_SUBS"
-	: >"$SUBFINDER_DOMAIN_SUBS"
-	: >"$DNSX_DOMAIN_SUBS"
-
-	subfinder -d "$ROOT_DOMAIN" -silent -o "$SUBFINDER_DOMAIN_RAW_SUBS" </dev/null >/dev/null 2>&1 || {
-		echo "[-] subfinder failed for $ROOT_DOMAIN." >&2
-		exit 1
-	}
-
-	cat "$SUBFINDER_DOMAIN_RAW_SUBS" >>"$SUBFINDER_RAW_SUBS"
-
-	DOMAIN_REGEX="${ROOT_DOMAIN//./\\.}"
-
-	sed 's/\.$//' "$SUBFINDER_DOMAIN_RAW_SUBS" |
-		tr '[:upper:]' '[:lower:]' |
-		grep -E "(^|\.)${DOMAIN_REGEX}$" >"$SUBFINDER_DOMAIN_SUBS" || true
-
-	SUBFINDER_TARGET_COUNT="$(wc -l <"$SUBFINDER_DOMAIN_SUBS" | tr -d ' ')"
-	printf '%s Passive enumeration found %s target(s) for %s.\n' "$INFO_PREFIX" "$SUBFINDER_TARGET_COUNT" "$ROOT_DOMAIN" >&2
-	cat "$SUBFINDER_DOMAIN_SUBS" >>"$DOMAIN_SUBS"
-
-	if [[ -n "$WORDLIST" ]]; then
-		printf '%s Running active DNS enumeration for %s...\n' "$INFO_PREFIX" "$ROOT_DOMAIN" >&2
-
-		python3 - "$WORDLIST" "$ROOT_DOMAIN" "$DNSX_DOMAIN_CANDIDATES" <<'PY'
-import sys
-from pathlib import Path
-
-wordlist = Path(sys.argv[1])
-root_domain = sys.argv[2].strip().lower().rstrip(".")
-candidate_file = Path(sys.argv[3])
-suffix = f".{root_domain}"
-candidates = set()
-
-for line in wordlist.read_text().splitlines():
-    word = line.strip().lower().rstrip(".")
-
-    if not word or word.startswith("#"):
-        continue
-
-    if word == root_domain or word.endswith(suffix):
-        candidate = word
-    else:
-        candidate = f"{word}.{root_domain}"
-
-    candidates.add(candidate)
-
-candidate_file.write_text("\n".join(sorted(candidates)) + "\n")
-PY
-
-		DNSX_ARGS=(-l "$DNSX_DOMAIN_CANDIDATES" -silent -o "$DNSX_DOMAIN_RAW_SUBS")
-
-		if [[ -n "$RESOLVERS" ]]; then
-			DNSX_ARGS+=(-r "$RESOLVERS")
-		fi
-
-		dnsx "${DNSX_ARGS[@]}" </dev/null >/dev/null 2>&1 || {
-			echo "[-] dnsx failed for $ROOT_DOMAIN." >&2
-			exit 1
-		}
-
-		sed 's/\.$//' "$DNSX_DOMAIN_RAW_SUBS" |
-			tr '[:upper:]' '[:lower:]' |
-			grep -E "(^|\.)${DOMAIN_REGEX}$" >"$DNSX_DOMAIN_SUBS" || true
-
-		DNSX_TARGET_COUNT="$(wc -l <"$DNSX_DOMAIN_SUBS" | tr -d ' ')"
-		printf '%s Active DNS enumeration found %s target(s) for %s.\n' "$INFO_PREFIX" "$DNSX_TARGET_COUNT" "$ROOT_DOMAIN" >&2
-		cat "$DNSX_DOMAIN_SUBS" >>"$DOMAIN_SUBS"
-	fi
+	run_subfinder_enum "$ROOT_DOMAIN" "$DOMAIN_SUBS"
+	run_dnsx_enum "$ROOT_DOMAIN" "$DOMAIN_SUBS"
+	run_gobuster_vhost_enum "$ROOT_DOMAIN" "$DOMAIN_SUBS"
 
 	sort -u -o "$DOMAIN_SUBS" "$DOMAIN_SUBS"
-	DOMAIN_TARGET_COUNT="$(wc -l <"$DOMAIN_SUBS" | tr -d ' ')"
+	DOMAIN_TARGET_COUNT="$(target_count "$DOMAIN_SUBS")"
 
 	if [[ "$DOMAIN_TARGET_COUNT" -eq 0 ]]; then
 		printf '%s No targets found for %s; continuing.\n' "$INFO_PREFIX" "$ROOT_DOMAIN" >&2
