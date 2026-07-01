@@ -27,6 +27,8 @@ administration. See [DISCLAIMER.md](DISCLAIMER.md) for details.
   detection results.
 - Optionally queries ipinfo.io Lite for geolocation, ASN, and ISP/organization
   metadata for each resolved target IP.
+- Optionally queries RDAP registration data for each supplied DNS zone using the
+  IANA RDAP bootstrap.
 - Suppresses noisy output from enumeration tools and `nmap` while printing
   progress messages.
 - Writes colorized JSON to the console through `jq -C`.
@@ -41,6 +43,22 @@ administration. See [DISCLAIMER.md](DISCLAIMER.md) for details.
   "domain": "example.com",
   "source_ip": "192.0.2.10",
   "run_datetime": "6/26/2026 2:41 PM EDT",
+  "registration": {
+    "registrar_whois_server": "whois.namecheap.com",
+    "registrar_url": "http://www.namecheap.com",
+    "updated_date": "2026-07-01T08:35:27Z",
+    "creation_date": "2026-07-01T08:35:27Z",
+    "expiration_date": "2027-07-01T08:35:27Z",
+    "registrar": "NAMECHEAP INC",
+    "registrant_name": "Redacted for Privacy",
+    "registrant_organization": "Withheld for Privacy ehf",
+    "registrant_street": "Kalkofnsvegur 2",
+    "registrant_city": "Reykjavik",
+    "registrant_state_province": "Capital Region",
+    "registrant_postal_code": "101",
+    "registrant_country": "IS",
+    "registrant_phone": "+354.4212434"
+  },
   "results": [
     {
       "target": "api.example.com",
@@ -91,6 +109,7 @@ administration. See [DISCLAIMER.md](DISCLAIMER.md) for details.
 - `dnsx` when using `--wordlist`
 - `gobuster` when using `--vhosts` or `--vhost-wordlist`
 - `wafw00f` when using `--waf`
+- `whois` when using `--whois`
 - `nmap`
 - `subfinder`
 - `python3`
@@ -207,6 +226,8 @@ Options:
   -ii, --ipinfo           Add ipinfo.io Lite geolocation and ASN data for each
                           resolved target IP.
                           Requires IPINFO_API_KEY in the environment.
+  -wi, --whois            Add registration data for each supplied DNS zone.
+                          Uses RDAP first, then local whois as a fallback.
   -p,  --ports            Comma-separated ports to test
   -oj, --outjson          Save JSON output to a file
   -od, --outdir           Output directory for JSON file
@@ -233,6 +254,8 @@ Common runs:
 ./connectivity-test-zone.sh -d example.com -wf
 ./connectivity-test-zone.sh --domain example.com --ipinfo
 ./connectivity-test-zone.sh -d example.com -ii
+./connectivity-test-zone.sh --domain example.com --whois
+./connectivity-test-zone.sh -d example.com -wi
 ./connectivity-test-zone.sh --domain example.com --ports 22,80,443
 ./connectivity-test-zone.sh -d example.com -p 22,80,443
 ./connectivity-test-zone.sh --domain example.com --outjson
@@ -301,6 +324,18 @@ Keychain and read it with the `security` command.
 If `--ipinfo` is present but `IPINFO_API_KEY` is not set, the script prints a
 yellow warning near startup and omits `ipinfo` from the JSON output.
 
+Use `--whois` or `-wi` to add registration data for each supplied DNS zone. The
+script downloads `https://data.iana.org/rdap/dns.json`, selects the authoritative
+RDAP endpoint for the domain suffix, and requests the domain registration object
+from that endpoint. If RDAP omits requested fields, the script falls back to the
+local `whois` command, first with the default registry lookup and then with the
+referred registrar WHOIS server when one is available. RDAP and WHOIS responses
+may still omit registrant contact fields or replace them with privacy/redaction
+values, depending on registry and registrar policy.
+Registrar WHOIS referrals that are returned as URLs, such as
+`https://whois.trustname.com/`, are normalized to hostnames before querying port
+43.
+
 ## Permissions
 
 The script uses `nmap -sS` when run as root and `nmap -sT` otherwise.
@@ -341,6 +376,17 @@ When `--ipinfo` is used with `IPINFO_API_KEY` set, resolved targets may include
 an `ipinfo` object with the response returned by the ipinfo.io Lite API, such as
 `ip`, `asn`, `as_name`, `as_domain`, `country_code`, `country`,
 `continent_code`, and `continent`. If the key is missing, the field is omitted.
+
+When `--whois` is used, single-domain runs include a top-level `registration`
+object. File-based runs with more than one domain include a top-level
+`registrations` object keyed by domain. RDAP values are used first, registry
+WHOIS values fill missing fields, and referred registrar WHOIS values replace
+earlier values when available. The registration object contains
+`registrar_whois_server`, `registrar_url`, `updated_date`, `creation_date`,
+`expiration_date`, `registrar`, `registrant_name`, `registrant_organization`,
+`registrant_street`, `registrant_city`, `registrant_state_province`,
+`registrant_postal_code`, `registrant_country`, and `registrant_phone`. Missing
+or redacted values are represented as `null`.
 
 Console JSON is colorized through `jq -C`. Saved JSON is plain valid JSON.
 

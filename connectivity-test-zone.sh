@@ -11,6 +11,7 @@ VHOST_SCHEME="https"
 VHOST_URL=""
 WAF=false
 IPINFO=false
+WHOIS=false
 PORTS="20,21,22,23,25,53,80,88,111,135,139,389,443,445,464,593,636,1433,1521,2049,2379,2380,3268,3269,3306,3389,5432,5672,5900,5985,5986,6379,6443,8000,8080,8081,8433,8443,9000,9200,9389,10250,27017"
 OUTJSON=false
 OUTDIR=""
@@ -74,6 +75,8 @@ Options:
   -ii, --ipinfo           Add ipinfo.io Lite geolocation and ASN data for each
                           resolved target IP.
                           Requires IPINFO_API_KEY in the environment.
+  -wi, --whois            Add registration data for each supplied DNS zone.
+                          Uses RDAP first, then local whois as a fallback.
   -p,  --ports            Comma-separated ports to test
                           Default: ${PORTS}
   -oj, --outjson          Save JSON output to a file
@@ -97,6 +100,8 @@ Examples:
   ${SCRIPT_NAME} -d example.com -wf
   ${SCRIPT_NAME} -d example.com --ipinfo
   ${SCRIPT_NAME} -d example.com -ii
+  ${SCRIPT_NAME} --domain example.com --whois
+  ${SCRIPT_NAME} -d example.com -wi
   ${SCRIPT_NAME} --domain example.com --ports 22,80,443
   ${SCRIPT_NAME} -d example.com -p 22,80,443
   ${SCRIPT_NAME} --domain example.com --outjson
@@ -120,6 +125,10 @@ check_dependencies() {
 
 	if [[ "$WAF" == true ]]; then
 		required_commands+=(wafw00f)
+	fi
+
+	if [[ "$WHOIS" == true ]]; then
+		required_commands+=(whois)
 	fi
 
 	for cmd in "${required_commands[@]}"; do
@@ -260,6 +269,10 @@ parse_args() {
 			;;
 		-ii | --ipinfo)
 			IPINFO=true
+			shift
+			;;
+		-wi | --whois)
+			WHOIS=true
 			shift
 			;;
 		-p | --ports)
@@ -543,7 +556,7 @@ fi
 
 RUN_DATETIME="$(date +"%m/%d/%Y %I:%M %p %Z" | sed -E 's#^0##; s#/0#/#; s# 0([0-9]):# \1:#')"
 
-python3 - "$SUBS" "$PORTS" "$NMAP_SCAN_TYPE" "$JSON_TEMP" "$NMAP_TMPDIR" "$RUN_DATETIME" "$DOMAINS" "$NMAP_TIMEOUT_SECONDS" "$WAF" "$WAFW00F_TIMEOUT_SECONDS" "$IPINFO" <<'PY'
+python3 - "$SUBS" "$PORTS" "$NMAP_SCAN_TYPE" "$JSON_TEMP" "$NMAP_TMPDIR" "$RUN_DATETIME" "$DOMAINS" "$NMAP_TIMEOUT_SECONDS" "$WAF" "$WAFW00F_TIMEOUT_SECONDS" "$IPINFO" "$WHOIS" <<'PY'
 import json
 import hashlib
 import os
@@ -553,6 +566,7 @@ import subprocess
 import sys
 import tempfile
 import urllib.error
+import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
@@ -570,8 +584,11 @@ nmap_timeout_seconds = int(sys.argv[8])
 waf_enabled = sys.argv[9] == "true"
 wafw00f_timeout_seconds = int(sys.argv[10])
 ipinfo_enabled = sys.argv[11] == "true"
+whois_enabled = sys.argv[12] == "true"
 ipinfo_api_key = os.environ.get("IPINFO_API_KEY", "").strip()
 ipinfo_cache: Dict[str, Optional[Dict[str, object]]] = {}
+rdap_bootstrap_cache: Optional[Dict[str, object]] = None
+rdap_cache: Dict[str, Dict[str, Optional[str]]] = {}
 
 domains = [
     line.strip().lower()
@@ -658,6 +675,465 @@ def lookup_ipinfo(ipaddress: str) -> Optional[Dict[str, object]]:
 
     ipinfo_cache[ipaddress] = payload
     return payload
+
+
+def empty_registration() -> Dict[str, Optional[str]]:
+    return {
+        "registrar_whois_server": None,
+        "registrar_url": None,
+        "updated_date": None,
+        "creation_date": None,
+        "expiration_date": None,
+        "registrar": None,
+        "registrant_name": None,
+        "registrant_organization": None,
+        "registrant_street": None,
+        "registrant_city": None,
+        "registrant_state_province": None,
+        "registrant_postal_code": None,
+        "registrant_country": None,
+        "registrant_phone": None,
+    }
+
+
+def merge_registration(
+    registration: Dict[str, Optional[str]],
+    fallback: Dict[str, Optional[str]],
+    *,
+    overwrite: bool = False,
+) -> Dict[str, Optional[str]]:
+    for key, value in fallback.items():
+        if not overwrite and registration.get(key):
+            continue
+
+        if not value:
+            continue
+
+        registration[key] = value
+
+    return registration
+
+
+def first_whois_value(
+    fields: Dict[str, List[str]],
+    names: List[str],
+) -> Optional[str]:
+    for name in names:
+        values = fields.get(name.lower(), [])
+
+        for value in values:
+            if value:
+                return value
+
+    return None
+
+
+def parse_whois_registration(raw_output: str) -> Dict[str, Optional[str]]:
+    fields: Dict[str, List[str]] = {}
+
+    for line in raw_output.splitlines():
+        if ":" not in line:
+            continue
+
+        key, value = line.split(":", 1)
+        normalized_key = " ".join(key.strip().lower().split())
+        normalized_value = value.strip()
+
+        if not normalized_key or not normalized_value:
+            continue
+
+        fields.setdefault(normalized_key, []).append(normalized_value)
+
+    registration = empty_registration()
+    registration["registrar_whois_server"] = first_whois_value(
+        fields,
+        ["registrar whois server", "whois server"],
+    )
+    registration["registrar_url"] = first_whois_value(
+        fields,
+        ["registrar url", "url of the icann whois inaccuracy complaint form"],
+    )
+    registration["updated_date"] = first_whois_value(
+        fields,
+        ["updated date", "last updated on"],
+    )
+    registration["creation_date"] = first_whois_value(
+        fields,
+        ["creation date", "created on", "created"],
+    )
+    registration["expiration_date"] = first_whois_value(
+        fields,
+        [
+            "registrar registration expiration date",
+            "registry expiry date",
+            "expiration date",
+            "expires on",
+            "expiry date",
+        ],
+    )
+    registration["registrar"] = first_whois_value(fields, ["registrar"])
+    registration["registrant_name"] = first_whois_value(fields, ["registrant name"])
+    registration["registrant_organization"] = first_whois_value(
+        fields,
+        ["registrant organization", "registrant org"],
+    )
+    registration["registrant_street"] = first_whois_value(
+        fields,
+        ["registrant street", "registrant address"],
+    )
+    registration["registrant_city"] = first_whois_value(fields, ["registrant city"])
+    registration["registrant_state_province"] = first_whois_value(
+        fields,
+        ["registrant state/province", "registrant state province", "registrant state"],
+    )
+    registration["registrant_postal_code"] = first_whois_value(
+        fields,
+        ["registrant postal code", "registrant zip code"],
+    )
+    registration["registrant_country"] = first_whois_value(
+        fields,
+        ["registrant country"],
+    )
+    registration["registrant_phone"] = first_whois_value(
+        fields,
+        ["registrant phone", "registrant phone number"],
+    )
+
+    return registration
+
+
+def query_whois(domain: str, server: Optional[str] = None) -> str:
+    cmd = ["whois"]
+    normalized_server = normalize_whois_server(server)
+
+    if normalized_server:
+        cmd.extend(["-h", normalized_server])
+
+    cmd.append(domain)
+
+    try:
+        completed = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=15,
+            text=True,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+    return completed.stdout
+
+
+def registration_from_whois(
+    domain: str,
+    server: Optional[str] = None,
+) -> Dict[str, Optional[str]]:
+    raw_output = query_whois(domain, server)
+
+    if not raw_output:
+        return empty_registration()
+
+    return parse_whois_registration(raw_output)
+
+
+def normalize_whois_server(server: Optional[str]) -> Optional[str]:
+    if not server:
+        return None
+
+    normalized = server.strip()
+
+    if not normalized:
+        return None
+
+    if "://" in normalized:
+        parsed = urllib.parse.urlparse(normalized)
+        normalized = parsed.netloc or parsed.path
+
+    normalized = normalized.split("/", 1)[0].strip()
+
+    if not normalized:
+        return None
+
+    return normalized
+
+
+def read_json_url(url: str, timeout: int = 8) -> Optional[Dict[str, object]]:
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/rdap+json, application/json",
+            "User-Agent": "connectivity-test-zone",
+        },
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (json.JSONDecodeError, OSError, TimeoutError, urllib.error.URLError):
+        return None
+
+    if isinstance(payload, dict):
+        return payload
+
+    return None
+
+
+def rdap_bootstrap() -> Optional[Dict[str, object]]:
+    global rdap_bootstrap_cache
+
+    if rdap_bootstrap_cache is None:
+        rdap_bootstrap_cache = read_json_url("https://data.iana.org/rdap/dns.json")
+
+    return rdap_bootstrap_cache
+
+
+def rdap_base_url(domain: str) -> Optional[str]:
+    bootstrap = rdap_bootstrap()
+
+    if not bootstrap:
+        return None
+
+    labels = domain.rstrip(".").lower().split(".")
+    services = bootstrap.get("services", [])
+
+    if not isinstance(services, list):
+        return None
+
+    for index in range(len(labels)):
+        candidate = ".".join(labels[index:])
+
+        for service in services:
+            if not isinstance(service, list) or len(service) < 2:
+                continue
+
+            tlds, urls = service[0], service[1]
+
+            if not isinstance(tlds, list) or not isinstance(urls, list):
+                continue
+
+            if candidate not in {str(tld).lower() for tld in tlds}:
+                continue
+
+            for url in urls:
+                if isinstance(url, str) and url.startswith(("http://", "https://")):
+                    return url.rstrip("/")
+
+    return None
+
+
+def rdap_domain_lookup(domain: str) -> Optional[Dict[str, object]]:
+    base_url = rdap_base_url(domain)
+
+    if not base_url:
+        return None
+
+    encoded_domain = urllib.parse.quote(domain.rstrip("."), safe="")
+    return read_json_url(f"{base_url}/domain/{encoded_domain}")
+
+
+def event_date(payload: Dict[str, object], action_names: List[str]) -> Optional[str]:
+    action_lookup = {action.lower() for action in action_names}
+    events = payload.get("events", [])
+
+    if not isinstance(events, list):
+        return None
+
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+
+        action = event.get("eventAction")
+        date = event.get("eventDate")
+
+        if (
+            isinstance(action, str)
+            and action.lower() in action_lookup
+            and isinstance(date, str)
+            and date
+        ):
+            return date
+
+    return None
+
+
+def entity_roles(entity: Dict[str, object]) -> List[str]:
+    roles = entity.get("roles", [])
+
+    if not isinstance(roles, list):
+        return []
+
+    return [str(role).lower() for role in roles]
+
+
+def vcard_values(entity: Dict[str, object], name: str) -> List[object]:
+    vcard = entity.get("vcardArray")
+
+    if (
+        not isinstance(vcard, list)
+        or len(vcard) < 2
+        or not isinstance(vcard[1], list)
+    ):
+        return []
+
+    values = []
+
+    for item in vcard[1]:
+        if not isinstance(item, list) or len(item) < 4:
+            continue
+
+        if item[0] == name:
+            values.append(item[3])
+
+    return values
+
+
+def first_vcard_text(entity: Dict[str, object], name: str) -> Optional[str]:
+    for value in vcard_values(entity, name):
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+        if isinstance(value, list):
+            text = ", ".join(str(item).strip() for item in value if str(item).strip())
+
+            if text:
+                return text
+
+    return None
+
+
+def entity_name(entity: Dict[str, object]) -> Optional[str]:
+    return first_vcard_text(entity, "fn") or first_vcard_text(entity, "name")
+
+
+def first_vcard_address(entity: Dict[str, object]) -> Dict[str, Optional[str]]:
+    empty_address = {
+        "street": None,
+        "city": None,
+        "state_province": None,
+        "postal_code": None,
+        "country": None,
+    }
+
+    for value in vcard_values(entity, "adr"):
+        if not isinstance(value, list) or len(value) < 7:
+            continue
+
+        street_value = value[2]
+
+        if isinstance(street_value, list):
+            street = ", ".join(
+                str(item).strip() for item in street_value if str(item).strip()
+            )
+        elif isinstance(street_value, str):
+            street = street_value.strip()
+        else:
+            street = None
+
+        return {
+            "street": street or None,
+            "city": str(value[3]).strip() or None,
+            "state_province": str(value[4]).strip() or None,
+            "postal_code": str(value[5]).strip() or None,
+            "country": str(value[6]).strip() or None,
+        }
+
+    return empty_address
+
+
+def first_entity(payload: Dict[str, object], role: str) -> Optional[Dict[str, object]]:
+    entities = payload.get("entities", [])
+
+    if not isinstance(entities, list):
+        return None
+
+    role = role.lower()
+
+    for entity in entities:
+        if isinstance(entity, dict) and role in entity_roles(entity):
+            return entity
+
+    return None
+
+
+def link_href(entity: Dict[str, object], rel: str) -> Optional[str]:
+    links = entity.get("links", [])
+
+    if not isinstance(links, list):
+        return None
+
+    for link in links:
+        if not isinstance(link, dict):
+            continue
+
+        link_rel = link.get("rel")
+        href = link.get("href")
+
+        if link_rel == rel and isinstance(href, str) and href.strip():
+            return href.strip()
+
+    return None
+
+
+def registration_from_rdap(domain: str) -> Dict[str, Optional[str]]:
+    if not whois_enabled:
+        return empty_registration()
+
+    if domain in rdap_cache:
+        return rdap_cache[domain]
+
+    registration = empty_registration()
+    payload = rdap_domain_lookup(domain)
+
+    if payload is not None:
+        port43 = payload.get("port43")
+
+        if isinstance(port43, str) and port43.strip():
+            registration["registrar_whois_server"] = port43.strip()
+
+        registration["updated_date"] = event_date(
+            payload, ["last changed", "last update of RDAP database"]
+        )
+        registration["creation_date"] = event_date(payload, ["registration"])
+        registration["expiration_date"] = event_date(payload, ["expiration"])
+
+        registrar_entity = first_entity(payload, "registrar")
+        registrant_entity = first_entity(payload, "registrant")
+
+        if registrar_entity:
+            registration["registrar"] = entity_name(registrar_entity)
+            registration["registrar_url"] = (
+                first_vcard_text(registrar_entity, "url")
+                or link_href(registrar_entity, "about")
+            )
+
+        if registrant_entity:
+            address = first_vcard_address(registrant_entity)
+            registration["registrant_name"] = entity_name(registrant_entity)
+            registration["registrant_organization"] = first_vcard_text(
+                registrant_entity, "org"
+            )
+            registration["registrant_street"] = address["street"]
+            registration["registrant_city"] = address["city"]
+            registration["registrant_state_province"] = address["state_province"]
+            registration["registrant_postal_code"] = address["postal_code"]
+            registration["registrant_country"] = address["country"]
+            registration["registrant_phone"] = first_vcard_text(
+                registrant_entity, "tel"
+            )
+
+    registry_whois = registration_from_whois(domain)
+    merge_registration(registration, registry_whois)
+
+    registrar_whois_server = registration.get("registrar_whois_server")
+
+    if registrar_whois_server:
+        registrar_whois = registration_from_whois(domain, registrar_whois_server)
+        merge_registration(registration, registrar_whois, overwrite=True)
+
+    rdap_cache[domain] = registration
+    return registration
 
 
 def scan_host(hostname: str) -> List[int]:
@@ -1120,6 +1596,9 @@ if len(domains) == 1:
         "run_datetime": run_datetime,
         "results": results,
     }
+
+    if whois_enabled:
+        output["registration"] = registration_from_rdap(domains[0])
 else:
     output = {
         "domains": domains,
@@ -1127,6 +1606,11 @@ else:
         "run_datetime": run_datetime,
         "results": results,
     }
+
+    if whois_enabled:
+        output["registrations"] = {
+            domain: registration_from_rdap(domain) for domain in domains
+        }
 
 json_text = json.dumps(output, indent=2)
 json_temp.write_text(json_text + "\n")
