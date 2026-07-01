@@ -235,8 +235,12 @@ The script uses `nmap -sS` when run as root and `nmap -sT` otherwise.
 Each result includes `tls_certificates`. The script attempts a direct TLS
 handshake against every open port found by `nmap`, accepts untrusted/self-signed
 certificates for inventory purposes, and deduplicates identical certificates by
-thumbprint. Each certificate object contains `issuer`, `subject`, `thumbprint`,
-`expiration`, and `expired`.
+thumbprint. Each certificate object contains `ports`, `issuer`, `subject`,
+`subject_alternative_names`, `thumbprint`, `expiration`, and `expired`.
+
+`ports` lists every open port where that certificate was observed.
+`subject_alternative_names` lists the DNS names from the certificate's Subject
+Alternative Name extension.
 
 `thumbprint` is the SHA-256 digest of the DER-encoded certificate, rendered as
 uppercase hexadecimal. `expiration` is rendered in UTC as a readable string such
