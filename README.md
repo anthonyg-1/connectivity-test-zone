@@ -25,6 +25,8 @@ administration. See [DISCLAIMER.md](DISCLAIMER.md) for details.
   metadata.
 - Optionally runs `wafw00f` against open HTTP/HTTPS endpoints and records WAF
   detection results.
+- Optionally queries ipinfo.io Lite for geolocation, ASN, and ISP/organization
+  metadata for each resolved target IP.
 - Suppresses noisy output from enumeration tools and `nmap` while printing
   progress messages.
 - Writes colorized JSON to the console through `jq -C`.
@@ -68,6 +70,16 @@ administration. See [DISCLAIMER.md](DISCLAIMER.md) for details.
             "products": ["Example WAF"]
           }
         ]
+      },
+      "ipinfo": {
+        "ip": "192.0.2.20",
+        "asn": "AS64496",
+        "as_name": "Example ISP, Inc.",
+        "as_domain": "example.net",
+        "country_code": "US",
+        "country": "United States",
+        "continent_code": "NA",
+        "continent": "North America"
       }
     }
   ]
@@ -192,6 +204,9 @@ Options:
                           Useful when the root domain does not resolve.
   -wf, --waf              Run WAF detection with wafw00f for open HTTP/HTTPS
                           endpoints.
+  -ii, --ipinfo           Add ipinfo.io Lite geolocation and ASN data for each
+                          resolved target IP.
+                          Requires IPINFO_API_KEY in the environment.
   -p,  --ports            Comma-separated ports to test
   -oj, --outjson          Save JSON output to a file
   -od, --outdir           Output directory for JSON file
@@ -216,6 +231,8 @@ Common runs:
 ./connectivity-test-zone.sh -d example.com --vhosts --vhost-url https://192.0.2.10
 ./connectivity-test-zone.sh --domain example.com --waf
 ./connectivity-test-zone.sh -d example.com -wf
+./connectivity-test-zone.sh --domain example.com --ipinfo
+./connectivity-test-zone.sh -d example.com -ii
 ./connectivity-test-zone.sh --domain example.com --ports 22,80,443
 ./connectivity-test-zone.sh -d example.com -p 22,80,443
 ./connectivity-test-zone.sh --domain example.com --outjson
@@ -266,6 +283,24 @@ Use `--waf` or `-wf` to run `wafw00f` against open HTTP/HTTPS endpoints found by
 the port scan. This is opt-in because it adds an additional request-driven check
 per web endpoint and can noticeably increase runtime on large target sets.
 
+Use `--ipinfo` or `-ii` to query ipinfo.io Lite for each resolved target IP and
+add an `ipinfo` object to that target's JSON result. This is opt-in because it
+sends discovered target IPs to ipinfo.io and requires an API key.
+
+Set the API key in the `IPINFO_API_KEY` environment variable before running:
+
+```bash
+export IPINFO_API_KEY="<your ipinfo.io API key>"
+```
+
+For regular use, prefer loading the variable from secure storage instead of
+leaving the key in shell history or dotfiles. On Linux desktops, store and read
+it with Secret Service tools such as `secret-tool`. On macOS, store it in
+Keychain and read it with the `security` command.
+
+If `--ipinfo` is present but `IPINFO_API_KEY` is not set, the script prints a
+yellow warning near startup and omits `ipinfo` from the JSON output.
+
 ## Permissions
 
 The script uses `nmap -sS` when run as root and `nmap -sT` otherwise.
@@ -301,6 +336,11 @@ response header as a product fallback when that header is available, otherwise
 it records `unknown`. Endpoint entries with `checked: false` are inconclusive
 rather than a negative WAF result. Endpoint `url` values include the scheme and
 hostname; the `port` field carries the port number.
+
+When `--ipinfo` is used with `IPINFO_API_KEY` set, resolved targets may include
+an `ipinfo` object with the response returned by the ipinfo.io Lite API, such as
+`ip`, `asn`, `as_name`, `as_domain`, `country_code`, `country`,
+`continent_code`, and `continent`. If the key is missing, the field is omitted.
 
 Console JSON is colorized through `jq -C`. Saved JSON is plain valid JSON.
 
