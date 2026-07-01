@@ -668,7 +668,15 @@ def decode_certificate(der_cert: bytes) -> Dict:
         return ssl._ssl._test_decode_cert(tmp.name)
 
 
-def read_tls_certificate(hostname: str, port: int) -> Optional[Dict[str, str]]:
+def certificate_subject_alternative_names(decoded_cert: Dict) -> List[str]:
+    return [
+        value
+        for name_type, value in decoded_cert.get("subjectAltName", ())
+        if name_type == "DNS"
+    ]
+
+
+def read_tls_certificate(hostname: str, port: int) -> Optional[Dict[str, object]]:
     context = ssl.create_default_context()
     context.check_hostname = False
     context.verify_mode = ssl.CERT_NONE
@@ -691,17 +699,19 @@ def read_tls_certificate(hostname: str, port: int) -> Optional[Dict[str, str]]:
     expiration_details = certificate_expiration_details(decoded_cert.get("notAfter", ""))
 
     return {
+        "ports": [port],
         "issuer": format_certificate_name(decoded_cert.get("issuer", ())),
         "subject": format_certificate_name(decoded_cert.get("subject", ())),
+        "subject_alternative_names": certificate_subject_alternative_names(decoded_cert),
         "thumbprint": hashlib.sha256(der_cert).hexdigest().upper(),
         "expiration": expiration_details["expiration"],
         "expired": expiration_details["expired"],
     }
 
 
-def scan_tls_certificates(hostname: str, open_ports: List[int]) -> List[Dict[str, str]]:
+def scan_tls_certificates(hostname: str, open_ports: List[int]) -> List[Dict[str, object]]:
     certificates = []
-    seen_thumbprints = set()
+    certificates_by_thumbprint = {}
 
     for port in open_ports:
         certificate = read_tls_certificate(hostname, port)
@@ -711,10 +721,11 @@ def scan_tls_certificates(hostname: str, open_ports: List[int]) -> List[Dict[str
 
         thumbprint = certificate["thumbprint"]
 
-        if thumbprint in seen_thumbprints:
+        if thumbprint in certificates_by_thumbprint:
+            certificates_by_thumbprint[thumbprint]["ports"].append(port)
             continue
 
-        seen_thumbprints.add(thumbprint)
+        certificates_by_thumbprint[thumbprint] = certificate
         certificates.append(certificate)
 
     return certificates
