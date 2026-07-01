@@ -12,6 +12,8 @@ administration. See [DISCLAIMER.md](DISCLAIMER.md) for details.
 ## What it does
 
 - Runs `subfinder` for the supplied domain or each domain in a supplied text file.
+- Includes each supplied domain itself in the connectivity scan, even when no
+  subdomains are discovered.
 - Optionally brute-forces DNS names with `dnsx` and a supplied wordlist, then
   merges those results with `subfinder` output.
 - Optionally enumerates HTTP virtual hosts, then merges those results with the
@@ -21,6 +23,8 @@ administration. See [DISCLAIMER.md](DISCLAIMER.md) for details.
 - Tests selected TCP ports with `nmap`.
 - Attempts a TLS handshake on each open port and records discovered certificate
   metadata.
+- Optionally runs `wafw00f` against open HTTP/HTTPS endpoints and records WAF
+  detection results.
 - Suppresses noisy output from enumeration tools and `nmap` while printing
   progress messages.
 - Writes colorized JSON to the console through `jq -C`.
@@ -50,7 +54,21 @@ administration. See [DISCLAIMER.md](DISCLAIMER.md) for details.
           "expiration": "December 15, 2026 at 11:59:59 PM UTC",
           "expired": false
         }
-      ]
+      ],
+      "waf": {
+        "checked": true,
+        "detected": true,
+        "products": ["Example WAF"],
+        "endpoints": [
+          {
+            "url": "https://api.example.com",
+            "port": 443,
+            "checked": true,
+            "detected": true,
+            "products": ["Example WAF"]
+          }
+        ]
+      }
     }
   ]
 }
@@ -60,6 +78,7 @@ administration. See [DISCLAIMER.md](DISCLAIMER.md) for details.
 
 - `dnsx` when using `--wordlist`
 - `gobuster` when using `--vhosts` or `--vhost-wordlist`
+- `wafw00f` when using `--waf`
 - `nmap`
 - `subfinder`
 - `python3`
@@ -81,7 +100,7 @@ administration. See [DISCLAIMER.md](DISCLAIMER.md) for details.
 Install common dependencies with Homebrew:
 
 ```bash
-brew install gobuster jq nmap shellcheck shfmt
+brew install gobuster jq nmap pipx shellcheck shfmt
 ```
 
 Install `subfinder` with Go:
@@ -100,6 +119,12 @@ Ensure your Go binary path is on `PATH`. A common setup is:
 
 ```bash
 export PATH="$PATH:$HOME/go/bin"
+```
+
+Install `wafw00f` if you plan to use `--waf`:
+
+```bash
+pipx install wafw00f
 ```
 
 ## Linux installation
@@ -108,7 +133,7 @@ On Debian/Ubuntu, install common packages with:
 
 ```bash
 sudo apt update
-sudo apt install -y gobuster jq nmap python3 sed grep coreutils findutils
+sudo apt install -y gobuster jq nmap pipx python3 sed grep coreutils findutils
 ```
 
 Install `subfinder` with Go:
@@ -127,6 +152,12 @@ Ensure your Go binary path is on `PATH`. A common setup is:
 
 ```bash
 export PATH="$PATH:$HOME/go/bin"
+```
+
+Install `wafw00f` if you plan to use `--waf`:
+
+```bash
+pipx install wafw00f
 ```
 
 ## Usage
@@ -159,6 +190,8 @@ Options:
                           Default: https
   -vu, --vhost-url        Optional base URL for vhost checks.
                           Useful when the root domain does not resolve.
+  -wf, --waf              Run WAF detection with wafw00f for open HTTP/HTTPS
+                          endpoints.
   -p,  --ports            Comma-separated ports to test
   -oj, --outjson          Save JSON output to a file
   -od, --outdir           Output directory for JSON file
@@ -181,6 +214,8 @@ Common runs:
 ./connectivity-test-zone.sh --domain example.com --vhosts
 ./connectivity-test-zone.sh -d example.com -vh -vwl vhost-wordlist.txt
 ./connectivity-test-zone.sh -d example.com --vhosts --vhost-url https://192.0.2.10
+./connectivity-test-zone.sh --domain example.com --waf
+./connectivity-test-zone.sh -d example.com -wf
 ./connectivity-test-zone.sh --domain example.com --ports 22,80,443
 ./connectivity-test-zone.sh -d example.com -p 22,80,443
 ./connectivity-test-zone.sh --domain example.com --outjson
@@ -201,7 +236,8 @@ list that accepts a TLS handshake.
 
 Use `--domains-file` or `-df` to read root domains from a text file, one domain
 per line. Empty lines are ignored. If the file does not exist, the script exits
-with an error before scanning.
+with an error before scanning. Each listed domain is included as a scan target
+alongside any discovered subdomains.
 
 Use `--wordlist` or `-wl` to run active DNS brute-force enumeration with `dnsx`
 in addition to the passive `subfinder` enumeration. The wordlist should contain
@@ -226,6 +262,10 @@ Use `--vhost-url` or `-vu` when the root domain itself does not resolve but you
 know the web server URL or IP address to probe. The vhost check appends and tests
 hostnames under each root domain.
 
+Use `--waf` or `-wf` to run `wafw00f` against open HTTP/HTTPS endpoints found by
+the port scan. This is opt-in because it adds an additional request-driven check
+per web endpoint and can noticeably increase runtime on large target sets.
+
 ## Permissions
 
 The script uses `nmap -sS` when run as root and `nmap -sT` otherwise.
@@ -249,6 +289,18 @@ certificate expiration timestamp is earlier than the scan time.
 
 If a target does not resolve, has no open ports, or none of its open ports accept
 a TLS handshake, `tls_certificates` is an empty array.
+
+Each result includes `waf`. When `--waf` is not used, `waf.checked` is `false`
+and `waf.endpoints` is empty. When `--waf` is used, the script checks open ports
+that commonly serve HTTP or HTTPS, records each checked endpoint URL, and sets
+`waf.detected` to `true` if `wafw00f` detects a WAF. If `wafw00f` detects a WAF
+and reports both a WAF name and manufacturer, products are rendered as
+`Name (Manufacturer)`, such as `Cloudfront (Amazon)`. If `wafw00f` detects a WAF
+but does not identify a product, the script uses the endpoint's HTTP `Server`
+response header as a product fallback when that header is available, otherwise
+it records `unknown`. Endpoint entries with `checked: false` are inconclusive
+rather than a negative WAF result. Endpoint `url` values include the scheme and
+hostname; the `port` field carries the port number.
 
 Console JSON is colorized through `jq -C`. Saved JSON is plain valid JSON.
 

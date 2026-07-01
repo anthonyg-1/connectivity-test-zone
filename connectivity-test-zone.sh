@@ -9,11 +9,13 @@ VHOSTS=false
 VHOST_WORDLIST=""
 VHOST_SCHEME="https"
 VHOST_URL=""
+WAF=false
 PORTS="20,21,22,23,25,53,80,88,111,135,139,389,443,445,464,593,636,1433,1521,2049,2379,2380,3268,3269,3306,3389,5432,5672,5900,5985,5986,6379,6443,8000,8080,8081,8433,8443,9000,9200,9389,10250,27017"
 OUTJSON=false
 OUTDIR=""
 JSON_FILENAME="connectivity-results.json"
 NMAP_TIMEOUT_SECONDS=60
+WAFW00F_TIMEOUT_SECONDS=30
 SCRIPT_NAME="./connectivity-test-zone.sh"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -64,6 +66,8 @@ Options:
                           Default: ${VHOST_SCHEME}
   -vu, --vhost-url        Optional base URL for vhost checks.
                           Useful when the root domain does not resolve.
+  -wf, --waf              Run WAF detection with wafw00f for open HTTP/HTTPS
+                          endpoints.
   -p,  --ports            Comma-separated ports to test
                           Default: ${PORTS}
   -oj, --outjson          Save JSON output to a file
@@ -83,6 +87,8 @@ Examples:
   ${SCRIPT_NAME} --domain example.com --vhosts
   ${SCRIPT_NAME} -d example.com -vh -vwl vhost-wordlist.txt
   ${SCRIPT_NAME} -d example.com -vh -vu https://192.0.2.10
+  ${SCRIPT_NAME} -d example.com --waf
+  ${SCRIPT_NAME} -d example.com -wf
   ${SCRIPT_NAME} --domain example.com --ports 22,80,443
   ${SCRIPT_NAME} -d example.com -p 22,80,443
   ${SCRIPT_NAME} --domain example.com --outjson
@@ -102,6 +108,10 @@ check_dependencies() {
 
 	if [[ "$VHOSTS" == true ]]; then
 		required_commands+=(gobuster)
+	fi
+
+	if [[ "$WAF" == true ]]; then
+		required_commands+=(wafw00f)
 	fi
 
 	for cmd in "${required_commands[@]}"; do
@@ -235,6 +245,10 @@ parse_args() {
 			VHOSTS=true
 			VHOST_URL="${2:-}"
 			shift 2
+			;;
+		-wf | --waf)
+			WAF=true
+			shift
 			;;
 		-p | --ports)
 			require_option_value "$1" "${2:-}"
@@ -474,7 +488,7 @@ printf '%s Loaded %s DNS zone(s).\n' "$INFO_PREFIX" "$DOMAIN_COUNT" >&2
 
 while IFS= read -r ROOT_DOMAIN; do
 	DOMAIN_SUBS="${WORKDIR}/subdomains-${ROOT_DOMAIN}.txt"
-	: >"$DOMAIN_SUBS"
+	printf '%s\n' "$ROOT_DOMAIN" >"$DOMAIN_SUBS"
 	run_subfinder_enum "$ROOT_DOMAIN" "$DOMAIN_SUBS"
 	run_dnsx_enum "$ROOT_DOMAIN" "$DOMAIN_SUBS"
 	run_gobuster_vhost_enum "$ROOT_DOMAIN" "$DOMAIN_SUBS"
@@ -511,7 +525,7 @@ fi
 
 RUN_DATETIME="$(date +"%m/%d/%Y %I:%M %p %Z" | sed -E 's#^0##; s#/0#/#; s# 0([0-9]):# \1:#')"
 
-python3 - "$SUBS" "$PORTS" "$NMAP_SCAN_TYPE" "$JSON_TEMP" "$NMAP_TMPDIR" "$RUN_DATETIME" "$DOMAINS" "$NMAP_TIMEOUT_SECONDS" <<'PY'
+python3 - "$SUBS" "$PORTS" "$NMAP_SCAN_TYPE" "$JSON_TEMP" "$NMAP_TMPDIR" "$RUN_DATETIME" "$DOMAINS" "$NMAP_TIMEOUT_SECONDS" "$WAF" "$WAFW00F_TIMEOUT_SECONDS" <<'PY'
 import json
 import hashlib
 import socket
@@ -519,6 +533,8 @@ import ssl
 import subprocess
 import sys
 import tempfile
+import urllib.error
+import urllib.request
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
@@ -532,6 +548,8 @@ nmap_tmpdir = Path(sys.argv[5])
 run_datetime = sys.argv[6]
 domain_file = Path(sys.argv[7])
 nmap_timeout_seconds = int(sys.argv[8])
+waf_enabled = sys.argv[9] == "true"
+wafw00f_timeout_seconds = int(sys.argv[10])
 
 domains = [
     line.strip().lower()
@@ -548,6 +566,21 @@ targets = [
 results = []
 green_color = "\033[32m"
 reset_color = "\033[0m"
+http_ports_by_scheme = {
+    80: "http",
+    8000: "http",
+    8008: "http",
+    8080: "http",
+    8081: "http",
+    8888: "http",
+    9000: "http",
+    9080: "http",
+    443: "https",
+    8433: "https",
+    8443: "https",
+    9443: "https",
+    10443: "https",
+}
 
 
 def resolve_ip(hostname: str) -> Optional[str]:
@@ -696,20 +729,26 @@ def read_tls_certificate(hostname: str, port: int) -> Optional[Dict[str, object]
     except ssl.SSLError:
         decoded_cert = {}
 
-    expiration_details = certificate_expiration_details(decoded_cert.get("notAfter", ""))
+    expiration_details = certificate_expiration_details(
+        decoded_cert.get("notAfter", "")
+    )
 
     return {
         "ports": [port],
         "issuer": format_certificate_name(decoded_cert.get("issuer", ())),
         "subject": format_certificate_name(decoded_cert.get("subject", ())),
-        "subject_alternative_names": certificate_subject_alternative_names(decoded_cert),
+        "subject_alternative_names": certificate_subject_alternative_names(
+            decoded_cert
+        ),
         "thumbprint": hashlib.sha256(der_cert).hexdigest().upper(),
         "expiration": expiration_details["expiration"],
         "expired": expiration_details["expired"],
     }
 
 
-def scan_tls_certificates(hostname: str, open_ports: List[int]) -> List[Dict[str, object]]:
+def scan_tls_certificates(
+    hostname: str, open_ports: List[int]
+) -> List[Dict[str, object]]:
     certificates = []
     certificates_by_thumbprint = {}
 
@@ -729,6 +768,250 @@ def scan_tls_certificates(hostname: str, open_ports: List[int]) -> List[Dict[str
         certificates.append(certificate)
 
     return certificates
+
+
+def default_waf_result() -> Dict[str, object]:
+    return {
+        "checked": False,
+        "detected": False,
+        "products": [],
+        "endpoints": [],
+    }
+
+
+def waf_display_url(hostname: str, scheme: str) -> str:
+    return f"{scheme}://{hostname}"
+
+
+def waf_request_url(hostname: str, port: int, scheme: str) -> str:
+    if (scheme == "http" and port == 80) or (scheme == "https" and port == 443):
+        return f"{scheme}://{hostname}"
+
+    return f"{scheme}://{hostname}:{port}"
+
+
+def normalize_waf_product(product: object) -> str:
+    if not isinstance(product, str):
+        return ""
+
+    normalized = product.strip()
+
+    if not normalized or normalized.lower() in {"none", "unknown", "generic"}:
+        return ""
+
+    return normalized
+
+
+def format_waf_product(product: str, manufacturer: str) -> str:
+    if not manufacturer:
+        return product
+
+    if (
+        product.lower() == manufacturer.lower()
+        or manufacturer.lower() in product.lower()
+    ):
+        return product
+
+    return f"{product} ({manufacturer})"
+
+
+def collect_waf_products(value: object) -> List[str]:
+    products = []
+
+    if isinstance(value, str):
+        product = normalize_waf_product(value)
+
+        if product:
+            products.append(product)
+    elif isinstance(value, list):
+        for item in value:
+            products.extend(collect_waf_products(item))
+    elif isinstance(value, dict):
+        manufacturer = normalize_waf_product(value.get("manufacturer"))
+        direct_products = []
+
+        for key in ("firewall", "waf", "name", "product"):
+            direct_products.extend(collect_waf_products(value.get(key)))
+
+        if direct_products:
+            products.extend(
+                format_waf_product(product, manufacturer) for product in direct_products
+            )
+        elif manufacturer:
+            products.append(manufacturer)
+
+        for key, item in value.items():
+            if key in {"firewall", "waf", "name", "product", "manufacturer"}:
+                continue
+
+            if isinstance(item, (dict, list)):
+                products.extend(collect_waf_products(item))
+
+    return products
+
+
+def waf_detection_from_payload(payload: object) -> Dict[str, object]:
+    detected = False
+    products = []
+
+    entries = payload if isinstance(payload, list) else [payload]
+
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+
+        detected_value = next(
+            (
+                entry[key]
+                for key in ("detected", "identified", "is_waf")
+                if isinstance(entry.get(key), bool)
+            ),
+            None,
+        )
+
+        entry_detected = detected_value is True
+
+        if entry_detected:
+            detected = True
+            products.extend(collect_waf_products(entry))
+
+        for key, value in entry.items():
+            if key in {"firewall", "waf", "name", "product", "manufacturer"}:
+                continue
+
+            if isinstance(value, (dict, list)):
+                nested_detection = waf_detection_from_payload(value)
+                detected = detected or bool(nested_detection["detected"])
+                products.extend(nested_detection["products"])
+
+    unique_products = sorted(set(products))
+
+    return {
+        "detected": detected,
+        "products": unique_products,
+    }
+
+
+def parse_wafw00f_json(output: str) -> object:
+    stripped_output = output.strip()
+
+    if not stripped_output:
+        raise json.JSONDecodeError("empty wafw00f output", output, 0)
+
+    try:
+        return json.loads(stripped_output)
+    except json.JSONDecodeError:
+        pass
+
+    starts = [
+        index
+        for index in (stripped_output.find("["), stripped_output.find("{"))
+        if index >= 0
+    ]
+
+    if not starts:
+        raise json.JSONDecodeError("wafw00f output contains no JSON", output, 0)
+
+    return json.loads(stripped_output[min(starts) :])
+
+
+def read_server_header(url: str) -> str:
+    request = urllib.request.Request(
+        url,
+        method="HEAD",
+        headers={"User-Agent": "connectivity-test-zone"},
+    )
+    context = ssl._create_unverified_context()
+
+    try:
+        with urllib.request.urlopen(
+            request,
+            timeout=5,
+            context=context,
+        ) as response:
+            return normalize_waf_product(response.headers.get("Server", ""))
+    except urllib.error.HTTPError as exc:
+        return normalize_waf_product(exc.headers.get("Server", ""))
+    except (OSError, TimeoutError, ValueError):
+        return ""
+
+
+def scan_waf_endpoint(hostname: str, port: int, scheme: str) -> Dict[str, object]:
+    url = waf_display_url(hostname, scheme)
+    request_url = waf_request_url(hostname, port, scheme)
+    endpoint_result = {
+        "url": url,
+        "port": port,
+        "checked": False,
+        "detected": False,
+        "products": [],
+    }
+
+    try:
+        completed = subprocess.run(
+            ["wafw00f", "-f", "json", "-o", "-", request_url],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=wafw00f_timeout_seconds,
+            text=True,
+        )
+    except subprocess.TimeoutExpired:
+        return endpoint_result
+    except OSError:
+        return endpoint_result
+
+    if completed.returncode not in {0, 1} and not completed.stdout.strip():
+        return endpoint_result
+
+    try:
+        payload = parse_wafw00f_json(completed.stdout)
+    except json.JSONDecodeError:
+        return endpoint_result
+
+    detection = waf_detection_from_payload(payload)
+    products = detection["products"]
+
+    if detection["detected"] and not products:
+        server_header = read_server_header(request_url)
+
+        if server_header:
+            products = [server_header]
+        else:
+            products = ["unknown"]
+
+    endpoint_result["checked"] = True
+    endpoint_result["detected"] = detection["detected"]
+    endpoint_result["products"] = products
+
+    return endpoint_result
+
+
+def scan_waf(hostname: str, open_ports: List[int]) -> Dict[str, object]:
+    if not waf_enabled:
+        return default_waf_result()
+
+    endpoints = []
+
+    for port in open_ports:
+        scheme = http_ports_by_scheme.get(port)
+
+        if scheme is None:
+            continue
+
+        endpoints.append(scan_waf_endpoint(hostname, port, scheme))
+
+    checked_endpoints = [endpoint for endpoint in endpoints if endpoint["checked"]]
+    products = sorted(
+        {product for endpoint in checked_endpoints for product in endpoint["products"]}
+    )
+
+    return {
+        "checked": len(checked_endpoints) > 0,
+        "detected": any(endpoint["detected"] for endpoint in checked_endpoints),
+        "products": products,
+        "endpoints": endpoints,
+    }
 
 
 total = len(targets)
@@ -751,12 +1034,14 @@ for index, target in enumerate(targets, start=1):
                 "connected": False,
                 "ports": [],
                 "tls_certificates": [],
+                "waf": default_waf_result(),
             }
         )
         continue
 
     open_ports = scan_host(target)
     tls_certificates = scan_tls_certificates(target, open_ports)
+    waf = scan_waf(target, open_ports)
 
     results.append(
         {
@@ -766,6 +1051,7 @@ for index, target in enumerate(targets, start=1):
             "connected": len(open_ports) > 0,
             "ports": open_ports,
             "tls_certificates": tls_certificates,
+            "waf": waf,
         }
     )
 
