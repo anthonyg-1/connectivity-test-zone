@@ -10,6 +10,7 @@ VHOST_WORDLIST=""
 VHOST_SCHEME="https"
 VHOST_URL=""
 WAF=false
+IPINFO=false
 PORTS="20,21,22,23,25,53,80,88,111,135,139,389,443,445,464,593,636,1433,1521,2049,2379,2380,3268,3269,3306,3389,5432,5672,5900,5985,5986,6379,6443,8000,8080,8081,8433,8443,9000,9200,9389,10250,27017"
 OUTJSON=false
 OUTDIR=""
@@ -21,9 +22,11 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 GREEN=$'\033[32m'
 RED=$'\033[31m'
+YELLOW=$'\033[33m'
 RESET=$'\033[0m'
 INFO_PREFIX="[${GREEN}+${RESET}]"
 WARN_PREFIX="[${RED}!${RESET}]"
+YELLOW_WARN_PREFIX="[${YELLOW}!${RESET}]"
 
 REQUIRED_COMMANDS=(
 	subfinder
@@ -68,6 +71,9 @@ Options:
                           Useful when the root domain does not resolve.
   -wf, --waf              Run WAF detection with wafw00f for open HTTP/HTTPS
                           endpoints.
+  -ii, --ipinfo           Add ipinfo.io Lite geolocation and ASN data for each
+                          resolved target IP.
+                          Requires IPINFO_API_KEY in the environment.
   -p,  --ports            Comma-separated ports to test
                           Default: ${PORTS}
   -oj, --outjson          Save JSON output to a file
@@ -89,6 +95,8 @@ Examples:
   ${SCRIPT_NAME} -d example.com -vh -vu https://192.0.2.10
   ${SCRIPT_NAME} -d example.com --waf
   ${SCRIPT_NAME} -d example.com -wf
+  ${SCRIPT_NAME} -d example.com --ipinfo
+  ${SCRIPT_NAME} -d example.com -ii
   ${SCRIPT_NAME} --domain example.com --ports 22,80,443
   ${SCRIPT_NAME} -d example.com -p 22,80,443
   ${SCRIPT_NAME} --domain example.com --outjson
@@ -248,6 +256,10 @@ parse_args() {
 			;;
 		-wf | --waf)
 			WAF=true
+			shift
+			;;
+		-ii | --ipinfo)
+			IPINFO=true
 			shift
 			;;
 		-p | --ports)
@@ -449,6 +461,12 @@ PY
 
 parse_args "$@"
 validate_input
+
+if [[ "$IPINFO" == true && -z "${IPINFO_API_KEY:-}" ]]; then
+	printf '%s --ipinfo requested but IPINFO_API_KEY is not set; ipinfo JSON will be omitted.\n' "$YELLOW_WARN_PREFIX" >&2
+	IPINFO=false
+fi
+
 check_dependencies
 
 WORKDIR="$(mktemp -d)"
@@ -525,9 +543,10 @@ fi
 
 RUN_DATETIME="$(date +"%m/%d/%Y %I:%M %p %Z" | sed -E 's#^0##; s#/0#/#; s# 0([0-9]):# \1:#')"
 
-python3 - "$SUBS" "$PORTS" "$NMAP_SCAN_TYPE" "$JSON_TEMP" "$NMAP_TMPDIR" "$RUN_DATETIME" "$DOMAINS" "$NMAP_TIMEOUT_SECONDS" "$WAF" "$WAFW00F_TIMEOUT_SECONDS" <<'PY'
+python3 - "$SUBS" "$PORTS" "$NMAP_SCAN_TYPE" "$JSON_TEMP" "$NMAP_TMPDIR" "$RUN_DATETIME" "$DOMAINS" "$NMAP_TIMEOUT_SECONDS" "$WAF" "$WAFW00F_TIMEOUT_SECONDS" "$IPINFO" <<'PY'
 import json
 import hashlib
+import os
 import socket
 import ssl
 import subprocess
@@ -550,6 +569,9 @@ domain_file = Path(sys.argv[7])
 nmap_timeout_seconds = int(sys.argv[8])
 waf_enabled = sys.argv[9] == "true"
 wafw00f_timeout_seconds = int(sys.argv[10])
+ipinfo_enabled = sys.argv[11] == "true"
+ipinfo_api_key = os.environ.get("IPINFO_API_KEY", "").strip()
+ipinfo_cache: Dict[str, Optional[Dict[str, object]]] = {}
 
 domains = [
     line.strip().lower()
@@ -605,6 +627,37 @@ def source_ip() -> Optional[str]:
             return sock.getsockname()[0]
     except OSError:
         return None
+
+
+def lookup_ipinfo(ipaddress: str) -> Optional[Dict[str, object]]:
+    if not ipinfo_enabled or not ipinfo_api_key:
+        return None
+
+    if ipaddress in ipinfo_cache:
+        return ipinfo_cache[ipaddress]
+
+    request = urllib.request.Request(
+        f"https://api.ipinfo.io/lite/{ipaddress}",
+        headers={
+            "Accept": "application/json",
+            "Authorization": f"Bearer {ipinfo_api_key}",
+            "User-Agent": "connectivity-test-zone",
+        },
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (json.JSONDecodeError, OSError, TimeoutError, urllib.error.URLError):
+        ipinfo_cache[ipaddress] = None
+        return None
+
+    if not isinstance(payload, dict):
+        ipinfo_cache[ipaddress] = None
+        return None
+
+    ipinfo_cache[ipaddress] = payload
+    return payload
 
 
 def scan_host(hostname: str) -> List[int]:
@@ -1042,18 +1095,21 @@ for index, target in enumerate(targets, start=1):
     open_ports = scan_host(target)
     tls_certificates = scan_tls_certificates(target, open_ports)
     waf = scan_waf(target, open_ports)
+    target_result = {
+        "target": target,
+        "ipaddress": ipaddress,
+        "resolved": True,
+        "connected": len(open_ports) > 0,
+        "ports": open_ports,
+        "tls_certificates": tls_certificates,
+        "waf": waf,
+    }
+    ipinfo = lookup_ipinfo(ipaddress)
 
-    results.append(
-        {
-            "target": target,
-            "ipaddress": ipaddress,
-            "resolved": True,
-            "connected": len(open_ports) > 0,
-            "ports": open_ports,
-            "tls_certificates": tls_certificates,
-            "waf": waf,
-        }
-    )
+    if ipinfo is not None:
+        target_result["ipinfo"] = ipinfo
+
+    results.append(target_result)
 
 results = sorted(results, key=lambda item: item["target"])
 
