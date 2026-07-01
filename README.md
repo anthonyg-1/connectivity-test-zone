@@ -1,8 +1,8 @@
 # connectivity-test-zone
 
 `connectivity-test-zone` enumerates DNS subdomains for one or more target domains,
-resolves each hostname, tests selected TCP ports, and emits JSON connectivity
-results.
+resolves each hostname, tests selected TCP ports, collects TLS certificate
+metadata from discovered services, and emits JSON results.
 
 ## Responsible use
 
@@ -19,6 +19,8 @@ administration. See [DISCLAIMER.md](DISCLAIMER.md) for details.
 - Resolves each hostname before scanning.
 - Skips `nmap` for unresolved names.
 - Tests selected TCP ports with `nmap`.
+- Attempts a TLS handshake on each open port and records discovered certificate
+  metadata.
 - Suppresses noisy output from enumeration tools and `nmap` while printing
   progress messages.
 - Writes colorized JSON to the console through `jq -C`.
@@ -39,7 +41,16 @@ administration. See [DISCLAIMER.md](DISCLAIMER.md) for details.
       "ipaddress": "192.0.2.20",
       "resolved": true,
       "connected": true,
-      "ports": [80, 443]
+      "ports": [80, 443],
+      "tls_certificates": [
+        {
+          "issuer": "commonName=Example Issuer",
+          "subject": "commonName=api.example.com",
+          "thumbprint": "C1F4A64C8D2D3B7A2F4B1F2D5F63A1B9E1D0B938254F0B7C8A9D123456789ABC",
+          "expiration": "December 15, 2026 at 11:59:59 PM UTC",
+          "expired": false
+        }
+      ]
     }
   ]
 }
@@ -185,6 +196,8 @@ Default ports:
 ```
 
 Use `--ports` or `-p` to override the default list.
+TLS certificate collection is automatic for any open port in the selected port
+list that accepts a TLS handshake.
 
 Use `--domains-file` or `-df` to read root domains from a text file, one domain
 per line. Empty lines are ignored. If the file does not exist, the script exits
@@ -218,6 +231,20 @@ hostnames under each root domain.
 The script uses `nmap -sS` when run as root and `nmap -sT` otherwise.
 
 ## Output
+
+Each result includes `tls_certificates`. The script attempts a direct TLS
+handshake against every open port found by `nmap`, accepts untrusted/self-signed
+certificates for inventory purposes, and deduplicates identical certificates by
+thumbprint. Each certificate object contains `issuer`, `subject`, `thumbprint`,
+`expiration`, and `expired`.
+
+`thumbprint` is the SHA-256 digest of the DER-encoded certificate, rendered as
+uppercase hexadecimal. `expiration` is rendered in UTC as a readable string such
+as `December 15, 2026 at 11:59:59 PM UTC`. `expired` is `true` when the
+certificate expiration timestamp is earlier than the scan time.
+
+If a target does not resolve, has no open ports, or none of its open ports accept
+a TLS handshake, `tls_certificates` is an empty array.
 
 Console JSON is colorized through `jq -C`. Saved JSON is plain valid JSON.
 
