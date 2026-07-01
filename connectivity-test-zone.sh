@@ -513,13 +513,16 @@ RUN_DATETIME="$(date +"%m/%d/%Y %I:%M %p %Z" | sed -E 's#^0##; s#/0#/#; s# 0([0-
 
 python3 - "$SUBS" "$PORTS" "$NMAP_SCAN_TYPE" "$JSON_TEMP" "$NMAP_TMPDIR" "$RUN_DATETIME" "$DOMAINS" "$NMAP_TIMEOUT_SECONDS" <<'PY'
 import json
+import hashlib
 import socket
+import ssl
 import subprocess
 import sys
 import tempfile
 import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 target_file = Path(sys.argv[1])
 ports = sys.argv[2]
@@ -629,6 +632,94 @@ def scan_host(hostname: str) -> List[int]:
     return sorted(set(open_ports))
 
 
+def format_certificate_name(name_parts: tuple) -> str:
+    attributes = []
+
+    for relative_distinguished_name in name_parts:
+        for key, value in relative_distinguished_name:
+            attributes.append(f"{key}={value}")
+
+    return ", ".join(attributes)
+
+
+def certificate_expiration_details(not_after: str) -> Dict[str, object]:
+    if not not_after:
+        return {"expiration": "", "expired": False}
+
+    try:
+        expires_at = datetime.strptime(not_after, "%b %d %H:%M:%S %Y %Z")
+    except ValueError:
+        return {"expiration": not_after, "expired": False}
+
+    expires_at = expires_at.replace(tzinfo=timezone.utc)
+
+    return {
+        "expiration": expires_at.strftime("%B %-d, %Y at %-I:%M:%S %p UTC"),
+        "expired": expires_at < datetime.now(timezone.utc),
+    }
+
+
+def decode_certificate(der_cert: bytes) -> Dict:
+    pem_cert = ssl.DER_cert_to_PEM_cert(der_cert)
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".pem", delete=True) as tmp:
+        tmp.write(pem_cert)
+        tmp.flush()
+        return ssl._ssl._test_decode_cert(tmp.name)
+
+
+def read_tls_certificate(hostname: str, port: int) -> Optional[Dict[str, str]]:
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+
+    try:
+        with socket.create_connection((hostname, port), timeout=3) as sock:
+            with context.wrap_socket(sock, server_hostname=hostname) as tls_sock:
+                der_cert = tls_sock.getpeercert(binary_form=True)
+    except (OSError, ssl.SSLError, TimeoutError):
+        return None
+
+    if not der_cert:
+        return None
+
+    try:
+        decoded_cert = decode_certificate(der_cert)
+    except ssl.SSLError:
+        decoded_cert = {}
+
+    expiration_details = certificate_expiration_details(decoded_cert.get("notAfter", ""))
+
+    return {
+        "issuer": format_certificate_name(decoded_cert.get("issuer", ())),
+        "subject": format_certificate_name(decoded_cert.get("subject", ())),
+        "thumbprint": hashlib.sha256(der_cert).hexdigest().upper(),
+        "expiration": expiration_details["expiration"],
+        "expired": expiration_details["expired"],
+    }
+
+
+def scan_tls_certificates(hostname: str, open_ports: List[int]) -> List[Dict[str, str]]:
+    certificates = []
+    seen_thumbprints = set()
+
+    for port in open_ports:
+        certificate = read_tls_certificate(hostname, port)
+
+        if certificate is None:
+            continue
+
+        thumbprint = certificate["thumbprint"]
+
+        if thumbprint in seen_thumbprints:
+            continue
+
+        seen_thumbprints.add(thumbprint)
+        certificates.append(certificate)
+
+    return certificates
+
+
 total = len(targets)
 
 for index, target in enumerate(targets, start=1):
@@ -648,11 +739,13 @@ for index, target in enumerate(targets, start=1):
                 "resolved": False,
                 "connected": False,
                 "ports": [],
+                "tls_certificates": [],
             }
         )
         continue
 
     open_ports = scan_host(target)
+    tls_certificates = scan_tls_certificates(target, open_ports)
 
     results.append(
         {
@@ -661,6 +754,7 @@ for index, target in enumerate(targets, start=1):
             "resolved": True,
             "connected": len(open_ports) > 0,
             "ports": open_ports,
+            "tls_certificates": tls_certificates,
         }
     )
 
