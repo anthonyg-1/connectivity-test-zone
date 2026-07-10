@@ -2,7 +2,8 @@
 
 `connectivity-test-zone` enumerates DNS subdomains for one or more target domains,
 resolves each hostname, tests selected TCP ports, collects TLS certificate
-metadata from discovered services, and emits JSON results.
+metadata from discovered services, and emits JSON-first results for authorized
+asset inventory and security assessment evidence collection.
 
 ## Responsible use
 
@@ -21,10 +22,19 @@ administration. See [DISCLAIMER.md](DISCLAIMER.md) for details.
 - Resolves each hostname before scanning.
 - Skips `nmap` for unresolved names.
 - Tests selected TCP ports with `nmap`.
+- Optionally runs nmap service/version detection with `-sV --version-light`.
+- Optionally runs safe/default NSE scripts and stores structured script output.
 - Attempts a TLS handshake on each open port and records discovered certificate
   metadata.
+- Optionally collects HTTP response evidence, including selected headers, page
+  title, redirects, and advisory security header assessments.
 - Optionally runs `wafw00f` against open HTTP/HTTPS endpoints and records WAF
   detection results.
+- Optionally runs `nuclei` against discovered HTTP/HTTPS endpoints and stores
+  JSONL findings as hypotheses requiring validation.
+- Optionally runs OWASP ZAP baseline scans through Docker and stores passive
+  scanner alerts as hypotheses requiring validation.
+- Adds advisory `prioritization_hints` for downstream report generation.
 - Optionally queries ipinfo.io Lite for geolocation, ASN, and ISP/organization
   metadata for each resolved target IP.
 - Optionally queries RDAP registration data for each supplied DNS zone using the
@@ -66,15 +76,88 @@ administration. See [DISCLAIMER.md](DISCLAIMER.md) for details.
       "resolved": true,
       "connected": true,
       "ports": [80, 443],
+      "services": [
+        {
+          "port": 443,
+          "protocol": "tcp",
+          "state": "open",
+          "name": "https",
+          "product": "nginx",
+          "version": "1.24.0",
+          "extrainfo": null,
+          "tunnel": "ssl",
+          "confidence": "10"
+        }
+      ],
       "tls_certificates": [
         {
+          "ports": [443],
           "issuer": "commonName=Example Issuer",
           "subject": "commonName=api.example.com",
           "thumbprint": "C1F4A64C8D2D3B7A2F4B1F2D5F63A1B9E1D0B938254F0B7C8A9D123456789ABC",
           "expiration": "December 15, 2026 at 11:59:59 PM UTC",
-          "expired": false
+          "expired": false,
+          "expires_soon": false,
+          "days_until_expiration": 167
         }
       ],
+      "http": {
+        "checked": true,
+        "endpoints": [
+          {
+            "url": "https://api.example.com",
+            "port": 443,
+            "reachable": true,
+            "status_code": 200,
+            "final_url": "https://api.example.com/login",
+            "title": "Login",
+            "server": "nginx",
+            "headers": {
+              "strict-transport-security": "max-age=31536000",
+              "content-security-policy": null,
+              "x-frame-options": "DENY",
+              "x-content-type-options": "nosniff",
+              "referrer-policy": "same-origin",
+              "permissions-policy": null,
+              "cross-origin-opener-policy": null,
+              "cross-origin-embedder-policy": null,
+              "cross-origin-resource-policy": null,
+              "access-control-allow-origin": null,
+              "access-control-allow-credentials": null,
+              "cache-control": "no-store",
+              "x-powered-by": null
+            },
+            "security_headers": {
+              "content_security_policy": {
+                "present": false,
+                "value": null,
+                "assessment": "missing",
+                "recommendation": "Consider implementing a Content-Security-Policy."
+              }
+            },
+            "security_header_summary": {
+              "score": 8,
+              "max_score": 12,
+              "rating": "Good",
+              "missing_headers": ["Content-Security-Policy", "Permissions-Policy"]
+            },
+            "security_header_findings": [
+              {
+                "category": "HTTP Security Headers",
+                "severity_hint": "low",
+                "title": "Content-Security-Policy header is missing",
+                "target": "https://api.example.com",
+                "port": 443,
+                "evidence": {
+                  "header": "Content-Security-Policy"
+                },
+                "recommendation": "Consider implementing a Content-Security-Policy."
+              }
+            ],
+            "error": null
+          }
+        ]
+      },
       "waf": {
         "checked": true,
         "detected": true,
@@ -89,6 +172,14 @@ administration. See [DISCLAIMER.md](DISCLAIMER.md) for details.
           }
         ]
       },
+      "nse": [
+        {
+          "port": 443,
+          "script_id": "http-title",
+          "output": "Example App"
+        }
+      ],
+      "host_nse": [],
       "ipinfo": {
         "ip": "192.0.2.20",
         "asn": "AS64496",
@@ -100,7 +191,72 @@ administration. See [DISCLAIMER.md](DISCLAIMER.md) for details.
         "continent": "North America"
       }
     }
-  ]
+  ],
+  "nuclei": {
+    "checked": true,
+    "severities": "info,low,medium,high,critical",
+    "findings": [
+      {
+        "template_id": "example-template",
+        "name": "Example Finding",
+        "severity": "info",
+        "matched_at": "https://api.example.com",
+        "host": "api.example.com",
+        "port": "443",
+        "type": "http",
+        "raw": {}
+      }
+    ],
+    "errors": []
+  },
+  "zap": {
+    "checked": true,
+    "mode": "baseline-passive",
+    "image": "ghcr.io/zaproxy/zaproxy:stable",
+    "spider_minutes": 1,
+    "timeout_minutes": 5,
+    "max_endpoints": 10,
+    "findings": [
+      {
+        "target": "https://api.example.com",
+        "mode": "baseline-passive",
+        "alerts": [
+          {
+            "target": "https://api.example.com",
+            "plugin_id": "10020",
+            "alert": "X-Frame-Options Header Not Set",
+            "risk": "Medium",
+            "confidence": "Medium",
+            "instances_count": 1,
+            "raw": {}
+          }
+        ],
+        "errors": [],
+        "exit_code": 0
+      }
+    ],
+    "errors": []
+  },
+  "prioritization_hints": [
+    {
+      "target": "https://api.example.com",
+      "port": 443,
+      "severity_hint": "low",
+      "category": "HTTP Security Headers",
+      "reason": "Content-Security-Policy header is missing; requires validation.",
+      "validation": "Confirm application context before reporting."
+    }
+  ],
+  "tool_metadata": {
+    "schema_version": "2.0",
+    "features_enabled": {
+      "service_version": true,
+      "nse": true,
+      "http_evidence": true,
+      "nuclei": true,
+      "zap": true
+    }
+  }
 }
 ```
 
@@ -110,6 +266,8 @@ administration. See [DISCLAIMER.md](DISCLAIMER.md) for details.
 - `gobuster` when using `--vhosts` or `--vhost-wordlist`
 - `wafw00f` when using `--waf`
 - `whois` when using `--whois`
+- `nuclei` when using `--nuclei`
+- `docker` when using `--zap`
 - `nmap`
 - `subfinder`
 - `python3`
@@ -146,6 +304,20 @@ Install `dnsx` with Go:
 go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest
 ```
 
+Install `nuclei` with Go if you plan to use `--nuclei`:
+
+```bash
+go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+```
+
+Install Docker Desktop and pull the ZAP stable image if you plan to use
+`--zap`:
+
+```bash
+brew install --cask docker
+docker pull ghcr.io/zaproxy/zaproxy:stable
+```
+
 Ensure your Go binary path is on `PATH`. A common setup is:
 
 ```bash
@@ -177,6 +349,20 @@ Install `dnsx` with Go:
 
 ```bash
 go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest
+```
+
+Install `nuclei` with Go if you plan to use `--nuclei`:
+
+```bash
+go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+```
+
+Install Docker and pull the ZAP stable image if you plan to use `--zap`:
+
+```bash
+sudo apt install -y docker.io
+sudo systemctl enable --now docker
+docker pull ghcr.io/zaproxy/zaproxy:stable
 ```
 
 Ensure your Go binary path is on `PATH`. A common setup is:
@@ -228,12 +414,39 @@ Options:
                           Requires IPINFO_API_KEY in the environment.
   -wi, --whois            Add registration data for each supplied DNS zone.
                           Uses RDAP first, then local whois as a fallback.
+  -sv, --service-version  Run nmap service/version detection with
+                          -sV --version-light.
+  --nse                   Run nmap NSE scripts. Defaults to default,safe.
+  --nse-scripts           NSE script set to use with --nse.
+                          Default: default,safe
+  -he, --http-evidence    Collect basic HTTP response evidence and advisory
+                          security header assessments.
+  --http-timeout          HTTP request timeout in seconds.
+                          Default: 10
+  -nu, --nuclei           Run nuclei against discovered HTTP/HTTPS endpoints.
+  --nuclei-severities     Nuclei severities to include.
+                          Default: info,low,medium,high,critical
+  --nuclei-templates      Optional nuclei template path.
+  -zap, --zap             Run OWASP ZAP baseline scan through Docker against
+                          discovered HTTP/HTTPS endpoints.
+  --zap-image             Docker image for ZAP baseline scans.
+                          Default: ghcr.io/zaproxy/zaproxy:stable
+  --zap-spider-minutes    Minutes for ZAP baseline spidering per endpoint.
+                          Default: 1
+  --zap-timeout-minutes   Max minutes to wait for each ZAP baseline scan.
+                          Default: 5
+  --zap-max-endpoints     Maximum HTTP/HTTPS endpoints to scan with ZAP.
+                          Default: 10
+  --rate-delay            Delay in seconds between optional evidence requests.
+                          Default: 0
   -p,  --ports            Comma-separated ports to test
+                          Default: 20,21,22,23,25,53,80,88,111,135,139,389,443,445,464,593,636,1433,1521,2049,2379,2380,3268,3269,3306,3389,5432,5672,5900,5985,5986,6379,6443,8000,8080,8081,8433,8443,9000,9200,9389,10250,27017
   -oj, --outjson          Save JSON output to a file
   -od, --outdir           Output directory for JSON file
                           Only used when --outjson is present
                           Default with --outjson: current directory
   -h,  --help             Help
+
 ```
 
 Common runs:
@@ -256,6 +469,10 @@ Common runs:
 ./connectivity-test-zone.sh -d example.com -ii
 ./connectivity-test-zone.sh --domain example.com --whois
 ./connectivity-test-zone.sh -d example.com -wi
+./connectivity-test-zone.sh -d example.com -oj -sv -he
+./connectivity-test-zone.sh -d example.com -oj -sv --nse --nse-scripts "default,safe"
+./connectivity-test-zone.sh -d example.com -oj -sv -he -nu
+./connectivity-test-zone.sh -d example.com -oj -sv -he -nu -zap
 ./connectivity-test-zone.sh --domain example.com --ports 22,80,443
 ./connectivity-test-zone.sh -d example.com -p 22,80,443
 ./connectivity-test-zone.sh --domain example.com --outjson
@@ -336,17 +553,122 @@ Registrar WHOIS referrals that are returned as URLs, such as
 `https://whois.trustname.com/`, are normalized to hostnames before querying port
 43.
 
+## Pentest evidence collection
+
+All pentest-oriented evidence features are opt-in and intended for authorized
+testing only. They collect structured observations for analyst review and
+downstream report generation. They do not perform automatic exploitation,
+credential attacks, payload delivery, persistence, evasion, or
+post-exploitation.
+
+Use `--service-version` or `-sv` to add nmap service/version evidence with
+`-sV --version-light`. The selected port list is preserved, unresolved hosts are
+still skipped, and each result gets a `services` array keyed by open port.
+
+Use `--nse` to run nmap NSE scripts. The default script set is `default,safe`.
+Use `--nse-scripts "default,safe"` to override the set explicitly. Do not use
+intrusive, brute, dos, or vuln script categories unless the scope owner has
+explicitly authorized that activity.
+
+Use `--http-evidence` or `-he` to perform a conservative GET request against
+discovered HTTP/HTTPS endpoints. The script records reachability, status code,
+final URL, page title, selected headers, and request errors. `--http-timeout 10`
+controls the per-request timeout. HTTP status codes such as 401, 403, and 404
+are treated as reachable responses, not script failures.
+
+HTTP evidence automatically includes an advisory security header assessment.
+The score is a convenience signal for reporting workflow triage only; it is not
+an industry standard, certification, or proof of vulnerability. Missing or weak
+headers are reported as hardening opportunities requiring analyst review.
+
+Use `--nuclei` or `-nu` to run `nuclei` against discovered HTTP/HTTPS endpoints.
+The default severities are `info,low,medium,high,critical`; override them with
+`--nuclei-severities`. Use `--nuclei-templates ./templates` to point at a
+specific template path. Nuclei findings are hypotheses and may be false
+positives; validate them manually before reporting.
+
+Use `--zap` or `-zap` to run OWASP ZAP baseline scans through Docker against
+discovered HTTP/HTTPS endpoints. This uses the ZAP Docker packaged baseline
+scan, which spiders briefly and waits for passive scanning. It does not perform
+active attacks. ZAP findings are passive scanner observations and may be false
+positives; validate them manually before reporting.
+
+Useful ZAP controls:
+
+```console
+./connectivity-test-zone.sh -d example.com -oj -sv -he -zap
+./connectivity-test-zone.sh -d example.com -oj -sv -he -zap \
+  --zap-max-endpoints 3
+./connectivity-test-zone.sh -d example.com -oj -sv -he -zap \
+  --zap-spider-minutes 2
+```
+
+Use `--rate-delay 1` to add a delay between optional request-oriented checks.
+This can reduce burstiness on large target sets.
+
+Sample evidence commands:
+
+```console
+./connectivity-test-zone.sh -d example.com -oj -sv -he
+./connectivity-test-zone.sh -d example.com -oj -sv --nse --nse-scripts "default,safe"
+./connectivity-test-zone.sh -d example.com -oj -sv -he -nu
+./connectivity-test-zone.sh -d example.com -oj -sv -he -nu -zap
+```
+
+Sample HTTP evidence excerpt:
+
+```json
+{
+  "http": {
+    "checked": true,
+    "endpoints": [
+      {
+        "url": "https://api.example.com",
+        "port": 443,
+        "reachable": true,
+        "status_code": 200,
+        "final_url": "https://api.example.com/login",
+        "title": "Login",
+        "server": "nginx",
+        "headers": {
+          "strict-transport-security": "max-age=31536000",
+          "content-security-policy": null,
+          "x-frame-options": "DENY",
+          "x-content-type-options": "nosniff",
+          "referrer-policy": "same-origin",
+          "x-powered-by": null
+        },
+        "security_header_summary": {
+          "score": 8,
+          "max_score": 12,
+          "rating": "Good",
+          "missing_headers": ["Content-Security-Policy", "Permissions-Policy"]
+        }
+      }
+    ]
+  }
+}
+```
+
 ## Permissions
 
 The script uses `nmap -sS` when run as root and `nmap -sT` otherwise.
 
 ## Output
 
+Each result includes `services`. Without `--service-version`, this contains the
+basic service names nmap infers from the selected ports when available. With
+`--service-version`, entries may also include `product`, `version`,
+`extrainfo`, `tunnel`, and nmap confidence values. NSE port script output is
+stored in the target-level `nse` array and, when associated with a service, on
+that service entry as `nse`. Host-level NSE scripts are stored in `host_nse`.
+
 Each result includes `tls_certificates`. The script attempts a direct TLS
 handshake against every open port found by `nmap`, accepts untrusted/self-signed
 certificates for inventory purposes, and deduplicates identical certificates by
 thumbprint. Each certificate object contains `ports`, `issuer`, `subject`,
-`subject_alternative_names`, `thumbprint`, `expiration`, and `expired`.
+`subject_alternative_names`, `thumbprint`, `expiration`, `expired`,
+`expires_soon`, and `days_until_expiration`.
 
 `ports` lists every open port where that certificate was observed.
 `subject_alternative_names` lists the DNS names from the certificate's Subject
@@ -359,6 +681,13 @@ certificate expiration timestamp is earlier than the scan time.
 
 If a target does not resolve, has no open ports, or none of its open ports accept
 a TLS handshake, `tls_certificates` is an empty array.
+
+Each result includes `http`. When `--http-evidence` is not used, `http.checked`
+is `false` and `http.endpoints` is empty. When enabled, endpoint entries contain
+request evidence, selected response headers, `security_headers`,
+`security_header_summary`, and `security_header_findings`. These findings are
+advisory hardening observations and should not be treated as confirmed
+vulnerabilities solely because a header is absent.
 
 Each result includes `waf`. When `--waf` is not used, `waf.checked` is `false`
 and `waf.endpoints` is empty. When `--waf` is used, the script checks open ports
@@ -387,6 +716,22 @@ earlier values when available. The registration object contains
 `registrant_street`, `registrant_city`, `registrant_state_province`,
 `registrant_postal_code`, `registrant_country`, and `registrant_phone`. Missing
 or redacted values are represented as `null`.
+
+Top-level `nuclei` contains `checked`, `severities`, normalized `findings`, and
+`errors`. The full raw nuclei JSON object is preserved under each finding's
+`raw` field.
+
+Top-level `zap` contains `checked`, baseline scan settings, per-endpoint
+`findings`, and `errors`. Each endpoint finding includes normalized passive
+alerts and preserves each raw ZAP alert under `raw`.
+
+Top-level `prioritization_hints` contains report-friendly observations such as
+externally reachable administrative services, HTTP security header hardening
+opportunities, TLS certificate expiration concerns, nuclei/ZAP findings that
+require validation, and service version evidence that may need patch validation.
+
+Top-level `tool_metadata` contains `schema_version`, enabled features, selected
+option values, and safety notes for downstream report agents.
 
 Console JSON is colorized through `jq -C`. Saved JSON is plain valid JSON.
 
