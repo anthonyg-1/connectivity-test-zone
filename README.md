@@ -561,6 +561,32 @@ downstream report generation. They do not perform automatic exploitation,
 credential attacks, payload delivery, persistence, evasion, or
 post-exploitation.
 
+### PHP CVE exposure checks
+
+`--http-evidence` (`-he`) also checks `X-Powered-By` and `Server` PHP version
+banners for potential CVE-2026-109618 and CVE-2026-109619 exposure. Results appear
+in each HTTP endpoint's `php_cve_findings` and in the high-severity pentest hints.
+The check uses the existing GET request; it does not send exploit or memory-exhaustion payloads.
+
+```bash
+./connectivity-test-zone.sh -d example.com -oj -he -nu
+```
+
+PHP's fixed supported releases are 8.2.35, 8.3.36, 8.4.27, and 8.5.12.
+Earlier releases on these branches and PHP 5.4 through 8.1 are flagged for review.
+See the upstream [OOM corruption advisory](https://github.com/php/php-src/security/advisories/GHSA-w8hw-w9fx-j79w)
+and [stale global state advisory](https://github.com/php/php-src/security/advisories/GHSA-6wmf-4rv5-p3rp).
+This is version-based triage, not confirmed exploit detection. Vendor backports
+can produce false positives; hidden, incomplete, misleading, or prerelease banners
+can produce false negatives. No finding does not establish that a server is patched.
+Confirm exposure against the installed package and its vendor advisory.
+
+Keep Nuclei rules current with `nuclei -ut`; as of 2026-10-21, the installed
+upstream template set v10.5.0 contains no dedicated checks for these CVEs.
+The built-in banner checks run independently of Nuclei and preserve its existing coverage.
+
+### Service and HTTP evidence
+
 Use `--service-version` or `-sv` to add nmap service/version evidence with
 `-sV --version-light`. The selected port list is preserved, unresolved hosts are
 still skipped, and each result gets a `services` array keyed by open port.
