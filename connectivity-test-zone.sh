@@ -2481,6 +2481,41 @@ def assess_security_headers(
     return results, summary, findings
 
 
+def assess_php_cve_exposure(headers: Dict[str, Optional[str]]) -> List[Dict[str, object]]:
+    """Banner-only triage; neither exploit verification nor a patch inventory."""
+    findings = []
+    fixed = {(8, 2): 35, (8, 3): 36, (8, 4): 27, (8, 5): 12}
+    for header in ("x-powered-by", "server"):
+        value = headers.get(header) or ""
+        for match in re.finditer(r"\bPHP/(\d+)\.(\d+)\.(\d+)(?![\d.])", value, re.I):
+            major, minor, patch = map(int, match.groups())
+            branch = (major, minor)
+            if branch not in fixed and not ((5, 4) <= branch <= (8, 1)):
+                continue
+            if branch in fixed and patch >= fixed[branch]:
+                continue
+            version = match.group(0).split("/", 1)[1]
+            for cve in ("CVE-2026-109618", "CVE-2026-109619"):
+                if any(item["cve"] == cve and item["version"] == version for item in findings):
+                    continue
+                findings.append({
+                    "cve": cve,
+                    "version": version,
+                    "assessment": "potentially_affected",
+                    "detection_method": "http_version_banner",
+                    "header": header,
+                    "value": value,
+                    "fixed_version": f"8.{minor}.{fixed[branch]}" if branch in fixed else None,
+                    "validation": (
+                        "Verify the installed PHP package and vendor security advisory. "
+                        "Banners may be stale or spoofed and vendor backports may fix older "
+                        "versions. This check does not confirm exploitability."
+                    ),
+                    "recommendation": "Install a vendor-patched PHP package or upgrade to a fixed supported release.",
+                })
+    return findings
+
+
 def fetch_http_endpoint(candidate: Dict[str, object]) -> Dict[str, object]:
     url = str(candidate["url"])
     port = int(candidate["port"])
@@ -2502,6 +2537,7 @@ def fetch_http_endpoint(candidate: Dict[str, object]) -> Dict[str, object]:
             "missing_headers": [],
         },
         "security_header_findings": [],
+        "php_cve_findings": [],
         "error": None,
     }
     request = urllib.request.Request(
@@ -2538,6 +2574,7 @@ def fetch_http_endpoint(candidate: Dict[str, object]) -> Dict[str, object]:
 
     selected_headers = selected_header_values(response_headers)
     server_header = response_headers.get("Server")
+    php_cve_findings = assess_php_cve_exposure({**selected_headers, "server": server_header})
     security_headers, summary, findings = assess_security_headers(
         {**selected_headers, "server": server_header},
         scheme,
@@ -2556,9 +2593,21 @@ def fetch_http_endpoint(candidate: Dict[str, object]) -> Dict[str, object]:
             "security_headers": security_headers,
             "security_header_summary": summary,
             "security_header_findings": findings,
+            "php_cve_findings": php_cve_findings,
             "error": None,
         }
     )
+
+    for finding in php_cve_findings:
+        append_hint(
+            target=url,
+            port=port,
+            severity_hint="high",
+            category="PHP CVE Exposure",
+            reason=f"PHP {finding['version']} banner indicates potential {finding['cve']} exposure; requires validation.",
+            validation=str(finding["validation"]),
+            evidence=finding,
+        )
 
     for finding in findings:
         append_hint(
